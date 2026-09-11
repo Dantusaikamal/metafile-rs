@@ -1,0 +1,50 @@
+[workspace]
+members = [
+    "crates/metafile-core",
+    "crates/metafile-wmf",
+    "crates/metafile-svg",
+    "bindings/wasm",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Dantusaikamal/metafile-rs"
+
+[workspace.dependencies]
+base64 = "0.22"
+encoding_rs = "0.8"
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+too_many_arguments = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+many_single_char_names = "allow"
+too_many_lines = "allow"
+wildcard_imports = "allow"
+needless_pass_by_value = "allow"
+semicolon_if_nothing_returned = "allow"
+default_trait_access = "allow"
+float_cmp = "allow"
+manual_midpoint = "allow"
+unreadable_literal = "allow"
+match_same_arms = "allow"
+derivable_impls = "allow"
+must_use_candidate = "allow"

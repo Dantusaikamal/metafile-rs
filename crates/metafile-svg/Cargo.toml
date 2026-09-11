@@ -1,0 +1,17 @@
+[package]
+name = "metafile-svg"
+description = "Deterministic SVG renderer for metafile-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+base64.workspace = true
+metafile-core = { path = "../metafile-core" }
+png.workspace = true
+
+[lints]
+workspace = true
+

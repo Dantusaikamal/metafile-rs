@@ -1,0 +1,18 @@
+[package]
+name = "metafile-wmf"
+description = "First-party safe WMF parser, playback engine, inspection, and SVG conversion"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+encoding_rs.workspace = true
+metafile-core = { path = "../metafile-core" }
+metafile-svg = { path = "../metafile-svg" }
+serde.workspace = true
+
+[lints]
+workspace = true
+

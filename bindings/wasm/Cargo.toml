@@ -1,0 +1,23 @@
+[package]
+name = "metafile-wasm"
+description = "Browser-neutral WebAssembly bindings for metafile-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+metafile-core = { path = "../../crates/metafile-core" }
+metafile-wmf = { path = "../../crates/metafile-wmf" }
+serde.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+
+[lints]
+workspace = true
+
