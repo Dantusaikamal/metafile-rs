@@ -3,7 +3,9 @@ members = [
     "crates/metafile-core",
     "crates/metafile-wmf",
     "crates/metafile-svg",
+    "crates/metafile",
     "bindings/wasm",
+    "tools/golden",
 ]
 resolver = "2"
 
@@ -20,8 +22,9 @@ encoding_rs = "0.8"
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-wasm-bindgen = "0.2"
+wasm-bindgen = "=0.2.128"
 serde-wasm-bindgen = "0.6"
+js-sys = "=0.3.105"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

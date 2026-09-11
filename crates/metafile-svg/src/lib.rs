@@ -5,6 +5,7 @@ use metafile_core::{
     ArcKind, Bitmap, Brush, BrushStyle, Color, MetafileError, Pen, PenStyle, Point, Rect, Renderer,
     ResourceLimits, Result, TextRun,
 };
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 #[derive(Debug)]
@@ -13,6 +14,7 @@ pub struct SvgRenderer {
     definitions: Vec<String>,
     bounds: Option<Rect>,
     next_clip_id: u32,
+    clip_ids: BTreeMap<String, u32>,
     output_bytes: usize,
     limits: ResourceLimits,
 }
@@ -25,6 +27,7 @@ impl SvgRenderer {
             definitions: Vec::new(),
             bounds: None,
             next_clip_id: 0,
+            clip_ids: BTreeMap::new(),
             output_bytes: 0,
             limits,
         }
@@ -52,6 +55,16 @@ impl SvgRenderer {
         let width = bounds.width().max(1.0);
         let height = bounds.height().max(1.0);
         let (display_w, display_h) = physical_size.unwrap_or((width, height));
+        if !bounds.is_finite()
+            || !display_w.is_finite()
+            || !display_h.is_finite()
+            || display_w <= 0.0
+            || display_h <= 0.0
+        {
+            return Err(MetafileError::SvgGeneration(
+                "non-finite or non-positive SVG bounds".into(),
+            ));
+        }
         if display_w > f64::from(self.limits.max_dimension)
             || display_h > f64::from(self.limits.max_dimension)
         {
@@ -61,9 +74,7 @@ impl SvgRenderer {
                 limit: u64::from(self.limits.max_dimension),
             });
         }
-        let pixels = (display_w.ceil() as u64)
-            .checked_mul(display_h.ceil() as u64)
-            .unwrap_or(u64::MAX);
+        let pixels = (display_w.ceil() as u64).saturating_mul(display_h.ceil() as u64);
         if pixels > self.limits.max_pixels {
             return Err(MetafileError::ResourceLimitExceeded {
                 resource: "SVG bounds-equivalent pixels",
@@ -94,6 +105,11 @@ impl SvgRenderer {
     }
 
     fn push(&mut self, element: String, bounds: Rect) -> Result<()> {
+        if !bounds.is_finite() {
+            return Err(MetafileError::SvgGeneration(
+                "non-finite element bounds".into(),
+            ));
+        }
         self.output_bytes = self.output_bytes.checked_add(element.len()).ok_or(
             MetafileError::ResourceLimitExceeded {
                 resource: "SVG output bytes",
@@ -117,15 +133,23 @@ impl SvgRenderer {
         let Some(r) = clip else {
             return String::new();
         };
+        let r = r.normalized();
+        let key = format!("{}:{}:{}:{}", n(r.left), n(r.top), n(r.right), n(r.bottom));
+        if let Some(id) = self.clip_ids.get(&key) {
+            return format!(" clip-path=\"url(#clip{id})\"");
+        }
         let id = self.next_clip_id;
         self.next_clip_id += 1;
-        let r = r.normalized();
+        self.clip_ids.insert(key, id);
         self.definitions.push(format!("<clipPath id=\"clip{id}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>", n(r.left), n(r.top), n(r.width()), n(r.height())));
         format!(" clip-path=\"url(#clip{id})\"")
     }
 }
 
 impl Renderer for SvgRenderer {
+    fn drawing_bounds(&self) -> Option<Rect> {
+        self.bounds
+    }
     fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<Rect>) -> Result<()> {
         let clip = self.clip_attr(clip);
         let style = paint(
@@ -144,7 +168,7 @@ impl Renderer for SvgRenderer {
                 n(to.x),
                 n(to.y)
             ),
-            points_bounds(&[from, to]),
+            stroke_bounds(points_bounds(&[from, to]), pen),
         )
     }
     fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<Rect>) -> Result<()> {
@@ -165,7 +189,7 @@ impl Renderer for SvgRenderer {
                     1
                 )
             ),
-            points_bounds(points),
+            stroke_bounds(points_bounds(points), pen),
         )
     }
     fn polygon(
@@ -187,7 +211,41 @@ impl Renderer for SvgRenderer {
                 point_list(points),
                 paint(pen, brush, fill_mode)
             ),
-            points_bounds(points),
+            stroke_bounds(points_bounds(points), pen),
+        )
+    }
+    fn poly_polygon(
+        &mut self,
+        polygons: &[Vec<Point>],
+        pen: &Pen,
+        brush: &Brush,
+        fill_mode: u16,
+        clip: Option<Rect>,
+    ) -> Result<()> {
+        let points: Vec<Point> = polygons.iter().flatten().copied().collect();
+        if points.is_empty() {
+            return Ok(());
+        }
+        let mut path = String::new();
+        for polygon in polygons {
+            if let Some(first) = polygon.first() {
+                write!(path, "M {} {}", n(first.x), n(first.y))
+                    .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+                for point in &polygon[1..] {
+                    write!(path, " L {} {}", n(point.x), n(point.y))
+                        .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+                }
+                path.push_str(" Z ");
+            }
+        }
+        let clip = self.clip_attr(clip);
+        self.push(
+            format!(
+                "<path d=\"{}\" {}{clip}/>",
+                path.trim(),
+                paint(pen, brush, fill_mode)
+            ),
+            stroke_bounds(points_bounds(&points), pen),
         )
     }
     fn rectangle(
@@ -216,7 +274,7 @@ impl Renderer for SvgRenderer {
                 n(r.height()),
                 paint(pen, brush, 1)
             ),
-            r,
+            stroke_bounds(r, pen),
         )
     }
     fn ellipse(&mut self, rect: Rect, pen: &Pen, brush: &Brush, clip: Option<Rect>) -> Result<()> {
@@ -231,7 +289,7 @@ impl Renderer for SvgRenderer {
                 n(r.height() / 2.0),
                 paint(pen, brush, 1)
             ),
-            r,
+            stroke_bounds(r, pen),
         )
     }
     fn arc(
@@ -240,6 +298,7 @@ impl Renderer for SvgRenderer {
         start: Point,
         end: Point,
         kind: ArcKind,
+        clockwise: bool,
         pen: &Pen,
         brush: &Brush,
         clip: Option<Rect>,
@@ -255,7 +314,7 @@ impl Renderer for SvgRenderer {
         let a1 = angle(end);
         let p0 = Point::new(cx + rx * a0.cos(), cy + ry * a0.sin());
         let p1 = Point::new(cx + rx * a1.cos(), cy + ry * a1.sin());
-        let mut delta = a1 - a0;
+        let mut delta = if clockwise { a1 - a0 } else { a0 - a1 };
         if delta <= 0.0 {
             delta += std::f64::consts::TAU;
         }
@@ -266,9 +325,10 @@ impl Renderer for SvgRenderer {
         }
         write!(
             d,
-            " A {} {} 0 {large} 1 {} {}",
+            " A {} {} 0 {large} {} {} {}",
             n(rx),
             n(ry),
+            i32::from(clockwise),
             n(p1.x),
             n(p1.y)
         )
@@ -287,7 +347,7 @@ impl Renderer for SvgRenderer {
         let clip = self.clip_attr(clip);
         self.push(
             format!("<path d=\"{d}\" {}{clip}/>", paint(pen, &actual_brush, 1)),
-            r,
+            stroke_bounds(r, pen),
         )
     }
     fn pixel(&mut self, point: Point, color: Color, clip: Option<Rect>) -> Result<()> {
@@ -335,7 +395,20 @@ impl Renderer for SvgRenderer {
         };
         let clip = self.clip_attr(run.clip);
         let size = run.font.height.abs().max(1.0);
-        if let Some(bg) = run.background {
+        if let (Some(bg), Some(background_rect)) = (run.background, run.background_rect) {
+            let background_rect = background_rect.normalized();
+            self.push(
+                format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"{clip}/>",
+                    n(background_rect.left),
+                    n(background_rect.top),
+                    n(background_rect.width()),
+                    n(background_rect.height()),
+                    bg.css()
+                ),
+                background_rect,
+            )?;
+        } else if let Some(bg) = run.background {
             self.push(
                 format!(
                     "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"{clip}/>",
@@ -353,7 +426,25 @@ impl Renderer for SvgRenderer {
                 },
             )?;
         }
-        self.push(format!("<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\"{transform}{clip}>{}</text>",n(run.position.x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"},xml(&run.text)),Rect{left:run.position.x,top:run.position.y-size,right:run.position.x+size*f64::from(run.text.chars().count() as u32)*0.6,bottom:run.position.y})
+        let content = if run.dx.is_empty() {
+            xml(&run.text)
+        } else {
+            let mut x = run.position.x;
+            let mut spans = String::new();
+            for (index, ch) in run.text.chars().enumerate() {
+                write!(
+                    spans,
+                    "<tspan x=\"{}\" y=\"{}\">{}</tspan>",
+                    n(x),
+                    n(run.position.y),
+                    xml(&ch.to_string())
+                )
+                .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+                x += run.dx.get(index).copied().unwrap_or(0.0);
+            }
+            spans
+        };
+        self.push(format!("<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\"{transform}{clip}>{content}</text>",n(run.position.x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"}),Rect{left:run.position.x,top:run.position.y-size,right:run.position.x+size*f64::from(run.text.chars().count() as u32)*0.6,bottom:run.position.y})
     }
     fn bitmap(&mut self, dest: Rect, bitmap: &Bitmap, clip: Option<Rect>) -> Result<()> {
         let mut bytes = Vec::new();
@@ -429,6 +520,18 @@ fn points_bounds(p: &[Point]) -> Rect {
     }
     r
 }
+fn stroke_bounds(rect: Rect, pen: &Pen) -> Rect {
+    if pen.style == PenStyle::Null {
+        return rect;
+    }
+    let half = pen.width.max(1.0) / 2.0;
+    Rect {
+        left: rect.left - half,
+        top: rect.top - half,
+        right: rect.right + half,
+        bottom: rect.bottom + half,
+    }
+}
 fn n(v: f64) -> String {
     if v.abs() < 0.000_000_5 {
         return "0".into();
@@ -456,6 +559,7 @@ mod tests {
             font: metafile_core::Font::default(),
             color: Color::BLACK,
             background: None,
+            background_rect: None,
             align: 0,
             clip: None,
             dx: vec![],

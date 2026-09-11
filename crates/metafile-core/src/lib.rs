@@ -9,6 +9,20 @@ pub struct Point {
     pub y: f64,
 }
 
+/// A translation-independent displacement or extent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Vector {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Vector {
+    #[must_use]
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+}
+
 impl Point {
     #[must_use]
     pub const fn new(x: f64, y: f64) -> Self {
@@ -60,6 +74,18 @@ impl Rect {
             bottom: a.bottom.max(b.bottom),
         }
     }
+    #[must_use]
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let a = self.normalized();
+        let b = other.normalized();
+        let result = Self {
+            left: a.left.max(b.left),
+            top: a.top.max(b.top),
+            right: a.right.min(b.right),
+            bottom: a.bottom.min(b.bottom),
+        };
+        (result.left < result.right && result.top < result.bottom).then_some(result)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +136,14 @@ pub enum Severity {
     Warning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetafileFormat {
+    Wmf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
     pub severity: Severity,
     pub code: String,
@@ -148,6 +181,7 @@ impl Diagnostic {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceLimits {
     pub max_input_bytes: usize,
     pub max_records: usize,
@@ -172,6 +206,22 @@ impl Default for ResourceLimits {
             max_objects: 16_384,
             max_points_per_record: 1_000_000,
             max_diagnostics: 256,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RenderOptions {
+    pub strict: bool,
+    pub limits: ResourceLimits,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            limits: ResourceLimits::default(),
         }
     }
 }
@@ -208,8 +258,23 @@ pub enum MetafileError {
     },
     #[error("invalid object handle {handle} at record {record_index}")]
     InvalidObjectHandle { handle: u16, record_index: usize },
+    #[error("object handle {handle} is selected and cannot be deleted at record {record_index}")]
+    ObjectInUse { handle: u16, record_index: usize },
+    #[error(
+        "invalid RestoreDC value {value} at record {record_index} with stack depth {stack_depth}"
+    )]
+    InvalidRestoreDc {
+        value: i16,
+        record_index: usize,
+        stack_depth: usize,
+    },
     #[error("invalid bitmap at record {record_index}: {message}")]
     InvalidBitmap {
+        record_index: usize,
+        message: String,
+    },
+    #[error("unsupported bitmap at record {record_index}: {message}")]
+    UnsupportedBitmap {
         record_index: usize,
         message: String,
     },
@@ -326,7 +391,7 @@ impl Default for Mapping {
 }
 impl Mapping {
     #[must_use]
-    pub fn transform(self, point: Point) -> Point {
+    pub fn transform_point(self, point: Point) -> Point {
         let sx = if self.window_extent.x == 0.0 {
             1.0
         } else {
@@ -343,13 +408,38 @@ impl Mapping {
         )
     }
     #[must_use]
+    pub fn transform_vector(self, vector: Vector) -> Vector {
+        let sx = if self.window_extent.x == 0.0 {
+            1.0
+        } else {
+            self.viewport_extent.x / self.window_extent.x
+        };
+        let sy = if self.window_extent.y == 0.0 {
+            1.0
+        } else {
+            self.viewport_extent.y / self.window_extent.y
+        };
+        Vector::new(vector.x * sx, vector.y * sy)
+    }
+    #[must_use]
     pub fn transform_rect(self, rect: Rect) -> Rect {
         Rect {
-            left: self.transform(Point::new(rect.left, rect.top)).x,
-            top: self.transform(Point::new(rect.left, rect.top)).y,
-            right: self.transform(Point::new(rect.right, rect.bottom)).x,
-            bottom: self.transform(Point::new(rect.right, rect.bottom)).y,
+            left: self.transform_point(Point::new(rect.left, rect.top)).x,
+            top: self.transform_point(Point::new(rect.left, rect.top)).y,
+            right: self.transform_point(Point::new(rect.right, rect.bottom)).x,
+            bottom: self.transform_point(Point::new(rect.right, rect.bottom)).y,
         }
+    }
+    #[must_use]
+    pub fn is_finite(self) -> bool {
+        self.window_origin.x.is_finite()
+            && self.window_origin.y.is_finite()
+            && self.window_extent.x.is_finite()
+            && self.window_extent.y.is_finite()
+            && self.viewport_origin.x.is_finite()
+            && self.viewport_origin.y.is_finite()
+            && self.viewport_extent.x.is_finite()
+            && self.viewport_extent.y.is_finite()
     }
 }
 
@@ -406,6 +496,7 @@ pub struct TextRun {
     pub font: Font,
     pub color: Color,
     pub background: Option<Color>,
+    pub background_rect: Option<Rect>,
     pub align: u16,
     pub clip: Option<Rect>,
     pub dx: Vec<f64>,
@@ -419,11 +510,20 @@ pub struct Bitmap {
 }
 
 pub trait Renderer {
+    fn drawing_bounds(&self) -> Option<Rect>;
     fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<Rect>) -> Result<()>;
     fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<Rect>) -> Result<()>;
     fn polygon(
         &mut self,
         points: &[Point],
+        pen: &Pen,
+        brush: &Brush,
+        fill_mode: u16,
+        clip: Option<Rect>,
+    ) -> Result<()>;
+    fn poly_polygon(
+        &mut self,
+        polygons: &[Vec<Point>],
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
@@ -444,6 +544,7 @@ pub trait Renderer {
         start: Point,
         end: Point,
         kind: ArcKind,
+        clockwise: bool,
         pen: &Pen,
         brush: &Brush,
         clip: Option<Rect>,
@@ -458,4 +559,60 @@ pub enum ArcKind {
     Arc,
     Pie,
     Chord,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_transform_ignores_translation() {
+        let mapping = Mapping {
+            window_origin: Point::new(100.0, 200.0),
+            window_extent: Point::new(10.0, 20.0),
+            viewport_origin: Point::new(1_000.0, 2_000.0),
+            viewport_extent: Point::new(20.0, -40.0),
+        };
+        assert_eq!(
+            mapping.transform_vector(Vector::new(3.0, 4.0)),
+            Vector::new(6.0, -8.0)
+        );
+        assert_eq!(
+            mapping.transform_point(Point::new(103.0, 204.0)),
+            Point::new(1_006.0, 1_992.0)
+        );
+    }
+
+    #[test]
+    fn rectangle_intersection_normalizes_and_preserves_empty() {
+        let a = Rect {
+            left: 10.0,
+            top: 10.0,
+            right: 0.0,
+            bottom: 0.0,
+        };
+        let b = Rect {
+            left: 5.0,
+            top: -5.0,
+            right: 15.0,
+            bottom: 5.0,
+        };
+        assert_eq!(
+            a.intersection(b),
+            Some(Rect {
+                left: 5.0,
+                top: 0.0,
+                right: 10.0,
+                bottom: 5.0
+            })
+        );
+        assert!(a
+            .intersection(Rect {
+                left: 20.0,
+                top: 20.0,
+                right: 30.0,
+                bottom: 30.0
+            })
+            .is_none());
+    }
 }

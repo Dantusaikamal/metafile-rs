@@ -7,6 +7,11 @@
 - `base64`: data-URI encoding for embedded PNG resources.
 - `wasm-bindgen`: standard `wasm32-unknown-unknown` JavaScript ABI bindings.
 - `serde-wasm-bindgen`: direct structured conversion between Serde and JS.
+- `js-sys`: constructs structured JavaScript error objects even when Serde
+  serialization itself fails.
+
+The golden-image command has a development-only direct dependency on `png` to
+decode candidate and reference images. It is not linked into parser or playback
+consumers.
 
 No dependency parses, interprets, plays, or renders WMF/EMF records.
-

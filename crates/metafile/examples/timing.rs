@@ -5,7 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: cargo run -p metafile-wmf --example timing -- file.wmf")?;
     let bytes = fs::read(path)?;
     let start = Instant::now();
-    let out = metafile_wmf::to_svg(&bytes, Default::default())?;
+    let out = metafile::to_svg(&bytes, Default::default())?;
     println!(
         "{} bytes -> {} SVG bytes in {:?}",
         bytes.len(),

@@ -1,18 +1,34 @@
 //! Thin byte-in/data-out WebAssembly bindings. Loading is owned by the host.
-use metafile_wmf::{inspect, to_svg, RenderOptions};
+use metafile::{inspect, to_svg, RenderOptions};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ErrorPayload {
     code: &'static str,
     message: String,
     offset: Option<usize>,
     record_index: Option<usize>,
+    record_type: Option<u16>,
 }
 fn js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(value)
-        .map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
+        .map_err(|e| structured_error("serialization_error", &format!("serialization failed: {e}")))
+}
+fn structured_error(code: &str, message: &str) -> JsValue {
+    let object = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(code),
+    );
+    let _ = js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("message"),
+        &JsValue::from_str(message),
+    );
+    object.into()
 }
 fn error(e: metafile_core::MetafileError) -> JsValue {
     let (offset, record_index) = match &e {
@@ -20,7 +36,10 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         | metafile_core::MetafileError::InvalidRecordSize { offset, .. }
         | metafile_core::MetafileError::RecordOutOfBounds { offset, .. } => (Some(*offset), None),
         metafile_core::MetafileError::InvalidObjectHandle { record_index, .. }
-        | metafile_core::MetafileError::InvalidBitmap { record_index, .. } => {
+        | metafile_core::MetafileError::ObjectInUse { record_index, .. }
+        | metafile_core::MetafileError::InvalidRestoreDc { record_index, .. }
+        | metafile_core::MetafileError::InvalidBitmap { record_index, .. }
+        | metafile_core::MetafileError::UnsupportedBitmap { record_index, .. } => {
             (None, Some(*record_index))
         }
         _ => (None, None),
@@ -35,7 +54,10 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         metafile_core::MetafileError::RecordOutOfBounds { .. } => "record_out_of_bounds",
         metafile_core::MetafileError::ResourceLimitExceeded { .. } => "resource_limit",
         metafile_core::MetafileError::InvalidObjectHandle { .. } => "invalid_object_handle",
+        metafile_core::MetafileError::ObjectInUse { .. } => "object_in_use",
+        metafile_core::MetafileError::InvalidRestoreDc { .. } => "invalid_restore_dc",
         metafile_core::MetafileError::InvalidBitmap { .. } => "invalid_bitmap",
+        metafile_core::MetafileError::UnsupportedBitmap { .. } => "unsupported_bitmap",
         metafile_core::MetafileError::UnsupportedCriticalFeature(_) => "unsupported_feature",
         metafile_core::MetafileError::SvgGeneration(_) => "svg_generation",
     };
@@ -44,8 +66,9 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         message: e.to_string(),
         offset,
         record_index,
+        record_type: None,
     })
-    .unwrap_or_else(|_| JsValue::from_str(&e.to_string()))
+    .unwrap_or_else(|_| structured_error(code, &e.to_string()))
 }
 #[wasm_bindgen(js_name = inspectWmf)]
 pub fn inspect_wmf(bytes: &[u8]) -> Result<JsValue, JsValue> {
@@ -57,7 +80,7 @@ pub fn wmf_to_svg(bytes: &[u8], options: Option<JsValue>) -> Result<JsValue, JsV
         || Ok(RenderOptions::default()),
         |v| {
             serde_wasm_bindgen::from_value(v)
-                .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))
+                .map_err(|e| structured_error("invalid_options", &format!("invalid options: {e}")))
         },
     )?;
     to_svg(bytes, options).map_err(error).and_then(|v| js(&v))

@@ -1,15 +1,15 @@
-//! Safe, first-party WMF parsing, inspection, stateful playback, and SVG output.
+//! Safe, first-party WMF parsing, inspection, and renderer-independent playback.
 
 mod dib;
 mod reader;
-pub mod record;
+mod record;
 
 use encoding_rs::{Encoding, WINDOWS_1252};
+pub use metafile_core::RenderOptions;
 use metafile_core::{
     ArcKind, Brush, BrushStyle, Color, DeviceContext, Diagnostic, Font, GdiObject, MetafileError,
-    Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result,
+    MetafileFormat, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result,
 };
-use metafile_svg::SvgRenderer;
 use reader::Reader;
 use record::*;
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,9 @@ pub enum WmfType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetafileInfo {
-    pub format: String,
+#[serde(rename_all = "camelCase")]
+pub struct WmfInfo {
+    pub format: MetafileFormat,
     pub wmf_type: WmfType,
     pub placeable: bool,
     pub bounds: Option<Rect>,
@@ -43,50 +44,39 @@ pub struct MetafileInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RenderOptions {
-    pub strict: bool,
-    pub limits: ResourceLimits,
-}
-impl Default for RenderOptions {
-    fn default() -> Self {
-        Self {
-            strict: false,
-            limits: ResourceLimits::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenderResult {
-    pub svg: String,
-    pub metadata: MetafileInfo,
+pub struct WmfPlaybackResult {
+    pub metadata: WmfInfo,
     pub diagnostics: Vec<Diagnostic>,
+    pub output_bounds: Option<Rect>,
+    pub physical_size: Option<(f64, f64)>,
 }
 
 struct Parsed<'a> {
-    info: MetafileInfo,
+    info: WmfInfo,
     records: Vec<RecordEntry<'a>>,
     placeable_bounds: Option<Rect>,
     units_per_inch: Option<u16>,
 }
 
-pub fn inspect(bytes: &[u8]) -> Result<MetafileInfo> {
+pub fn inspect(bytes: &[u8]) -> Result<WmfInfo> {
     inspect_with_options(bytes, &RenderOptions::default())
 }
-pub fn inspect_with_options(bytes: &[u8], options: &RenderOptions) -> Result<MetafileInfo> {
+pub fn inspect_with_options(bytes: &[u8], options: &RenderOptions) -> Result<WmfInfo> {
     Ok(parse(bytes, &options.limits)?.info)
 }
-pub fn to_svg(bytes: &[u8], options: RenderOptions) -> Result<RenderResult> {
+pub fn playback(
+    bytes: &[u8],
+    options: &RenderOptions,
+    renderer: &mut dyn Renderer,
+) -> Result<WmfPlaybackResult> {
     let parsed = parse(bytes, &options.limits)?;
     let mut diagnostics = parsed.info.warnings.clone();
-    let mut svg = SvgRenderer::new(options.limits.clone());
     let mut player = Player::new(parsed.info.object_count, options.limits.clone());
     for entry in &parsed.records {
-        player.play(entry, &mut svg, &mut diagnostics, options.strict)?;
+        player.play(entry, renderer, &mut diagnostics, options.strict)?;
     }
     if player.dc.clip.is_some() { /* clip state is emitted per operation */ }
-    let drawn_bounds = svg.drawing_bounds();
+    let drawn_bounds = renderer.drawing_bounds();
     if parsed.placeable_bounds.is_none() && drawn_bounds.is_none() {
         diagnostics.push(Diagnostic::warning(
             "unreliable_bounds",
@@ -101,15 +91,15 @@ pub fn to_svg(bytes: &[u8], options: RenderOptions) -> Result<RenderResult> {
         )),
         _ => drawn_bounds.map(|b| (b.width().max(1.0), b.height().max(1.0))),
     };
-    let svg = svg.finish(output_bounds, physical)?;
     let mut metadata = parsed.info;
     metadata.bounds = output_bounds;
     metadata.estimated_width = physical.map(|p| p.0);
     metadata.estimated_height = physical.map(|p| p.1);
-    Ok(RenderResult {
-        svg,
+    Ok(WmfPlaybackResult {
         metadata,
         diagnostics,
+        output_bounds,
+        physical_size: physical,
     })
 }
 
@@ -232,14 +222,44 @@ fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
         });
     }
     let (records, eof) = parse_records(bytes, header_start + 18, declared_end, limits)?;
+    let actual_max = records
+        .iter()
+        .map(|record| record.size_words)
+        .max()
+        .unwrap_or(3);
+    if max_record < actual_max {
+        return Err(MetafileError::InvalidHeader(format!(
+            "declared maximum record size {max_record} words is smaller than actual {actual_max}"
+        )));
+    }
+    if max_record > actual_max {
+        warnings.push(Diagnostic::warning(
+            "maximum_record_size_mismatch",
+            format!("declared maximum record size is {max_record} words; actual maximum is {actual_max}"),
+        ));
+    }
+    if let Some(last) = records.last() {
+        let record_end = last
+            .offset
+            .saturating_add((last.size_words as usize).saturating_mul(2));
+        if eof && record_end < declared_end {
+            warnings.push(Diagnostic::warning(
+                "data_after_eof",
+                format!(
+                    "{} bytes follow META_EOF inside the declared file",
+                    declared_end - record_end
+                ),
+            ));
+        }
+    }
     if !eof {
         warnings.push(Diagnostic::warning(
             "missing_eof",
             "WMF ended without META_EOF",
         ));
     }
-    let info = MetafileInfo {
-        format: "wmf".into(),
+    let info = WmfInfo {
+        format: MetafileFormat::Wmf,
         wmf_type,
         placeable,
         bounds,
@@ -304,8 +324,19 @@ impl Player {
             }
             Record::OneI16(f, v) => match *f {
                 META_SETBKMODE => self.dc.background_opaque = *v == 2,
-                META_SETMAPMODE => self.dc.map_mode = *v,
-                META_SETROP2 => self.dc.raster_op = *v as u16,
+                META_SETMAPMODE => self.set_map_mode(*v, e, d, strict)?,
+                META_SETROP2 => {
+                    self.dc.raster_op = *v as u16;
+                    if *v != 13 {
+                        self.unsupported(
+                            strict,
+                            d,
+                            e,
+                            "unsupported_rop2",
+                            "non-copy vector raster operations are not representable in SVG",
+                        )?;
+                    }
+                }
                 META_SETPOLYFILLMODE => self.dc.polygon_fill_mode = *v as u16,
                 META_SETSTRETCHBLTMODE => self.dc.stretch_mode = *v as u16,
                 META_RESTOREDC => self.restore(*v, e.index)?,
@@ -314,7 +345,7 @@ impl Player {
             Record::OneU16(f, v) => match *f {
                 META_SETTEXTALIGN => self.dc.text_align = *v,
                 META_SELECTOBJECT => self.select(*v, e.index)?,
-                META_DELETEOBJECT => self.delete(*v, e.index)?,
+                META_DELETEOBJECT => self.delete(*v, e, d, strict)?,
                 _ => {}
             },
             Record::OneU32(f, v) => match *f {
@@ -328,13 +359,24 @@ impl Player {
                 META_LINETO => {
                     let a = self.map(self.dc.current_position);
                     let b = self.map(*p);
-                    r.line(a, b, &self.dc.pen, self.clip())?;
+                    r.line(a, b, &self.mapped_pen(), self.clip())?;
                     self.dc.current_position = *p;
                 }
                 META_SETWINDOWORG => self.dc.mapping.window_origin = *p,
-                META_SETWINDOWEXT => self.dc.mapping.window_extent = *p,
+                META_SETWINDOWEXT if matches!(self.dc.map_mode, 7 | 8) => {
+                    if p.x == 0.0 || p.y == 0.0 {
+                        return Err(MetafileError::InvalidHeader(
+                            "window extent contains zero".into(),
+                        ));
+                    }
+                    self.dc.mapping.window_extent = *p;
+                    self.adjust_isotropic();
+                }
                 META_SETVIEWPORTORG => self.dc.mapping.viewport_origin = *p,
-                META_SETVIEWPORTEXT => self.dc.mapping.viewport_extent = *p,
+                META_SETVIEWPORTEXT if matches!(self.dc.map_mode, 7 | 8) => {
+                    self.dc.mapping.viewport_extent = *p;
+                    self.adjust_isotropic();
+                }
                 META_OFFSETWINDOWORG => {
                     self.dc.mapping.window_origin.x += p.x;
                     self.dc.mapping.window_origin.y += p.y;
@@ -346,32 +388,56 @@ impl Player {
                 _ => {}
             },
             Record::Scale(f, v) => {
-                let target = if *f == META_SCALEWINDOWEXT {
-                    &mut self.dc.mapping.window_extent
-                } else {
-                    &mut self.dc.mapping.viewport_extent
-                };
-                if v[0] == 0 || v[2] == 0 {
-                    return Err(MetafileError::InvalidHeader(
-                        "mapping scale denominator is zero".into(),
-                    ));
+                if matches!(self.dc.map_mode, 7 | 8) {
+                    let target = if *f == META_SCALEWINDOWEXT {
+                        &mut self.dc.mapping.window_extent
+                    } else {
+                        &mut self.dc.mapping.viewport_extent
+                    };
+                    if v[0] == 0 || v[2] == 0 {
+                        return Err(MetafileError::InvalidHeader(
+                            "mapping scale denominator is zero".into(),
+                        ));
+                    }
+                    target.y *= f64::from(v[1]) / f64::from(v[0]);
+                    target.x *= f64::from(v[3]) / f64::from(v[2]);
+                    if !self.dc.mapping.is_finite() {
+                        return Err(MetafileError::ResourceLimitExceeded {
+                            resource: "coordinate transform",
+                            actual: u64::MAX,
+                            limit: u64::MAX - 1,
+                        });
+                    }
+                    self.adjust_isotropic();
                 }
-                target.y *= f64::from(v[1]) / f64::from(v[0]);
-                target.x *= f64::from(v[3]) / f64::from(v[2]);
             }
             Record::Rect(f, rect) => {
                 let mr = self.map_rect(*rect);
-                match *f{META_RECTANGLE=>r.rectangle(mr,None,&self.dc.pen,&self.dc.brush,self.clip())?,META_ELLIPSE=>r.ellipse(mr,&self.dc.pen,&self.dc.brush,self.clip())?,META_INTERSECTCLIPRECT=>self.intersect_clip(mr),META_EXCLUDECLIPRECT=>self.warn(d,e,"approximate_exclude_clip","META_EXCLUDECLIPRECT cannot be represented by the rectangular clip model and was skipped"),_=>{}}
+                let pen = self.mapped_pen();
+                match *f {
+                    META_RECTANGLE => r.rectangle(mr, None, &pen, &self.dc.brush, self.clip())?,
+                    META_ELLIPSE => r.ellipse(mr, &pen, &self.dc.brush, self.clip())?,
+                    META_INTERSECTCLIPRECT => self.intersect_clip(mr),
+                    META_EXCLUDECLIPRECT => self.unsupported(
+                        strict,
+                        d,
+                        e,
+                        "unsupported_exclude_clip",
+                        "META_EXCLUDECLIPRECT cannot be represented by the rectangular clip model",
+                    )?,
+                    _ => {}
+                }
             }
             Record::RoundRect(rect, rad) => {
-                let scale = self.map(*rad);
+                let scale = self
+                    .dc
+                    .mapping
+                    .transform_vector(metafile_core::Vector::new(rad.x, rad.y));
+                let pen = self.mapped_pen();
                 r.rectangle(
                     self.map_rect(*rect),
-                    Some(Point::new(
-                        scale.x - self.dc.mapping.viewport_origin.x,
-                        scale.y - self.dc.mapping.viewport_origin.y,
-                    )),
-                    &self.dc.pen,
+                    Some(Point::new(scale.x, scale.y)),
+                    &pen,
                     &self.dc.brush,
                     self.clip(),
                 )?
@@ -384,12 +450,16 @@ impl Player {
                 } else {
                     ArcKind::Chord
                 };
+                let pen = self.mapped_pen();
                 r.arc(
                     self.map_rect(*rect),
                     self.map(*start),
                     self.map(*end),
                     kind,
-                    &self.dc.pen,
+                    self.dc.mapping.viewport_extent.x * self.dc.mapping.viewport_extent.y
+                        / (self.dc.mapping.window_extent.x * self.dc.mapping.window_extent.y)
+                        < 0.0,
+                    &pen,
                     &self.dc.brush,
                     self.clip(),
                 )?
@@ -417,19 +487,20 @@ impl Player {
                     color: color(*c),
                 };
                 if !matches!(brush.style, BrushStyle::Solid | BrushStyle::Null) {
-                    self.warn(d, e, "unsupported_brush_style", "hatch and pattern brushes are not rendered; brush is treated as transparent");
+                    self.unsupported(strict, d, e, "unsupported_brush_style", "hatch and pattern brushes are not rendered; brush is treated as transparent")?;
                 }
                 self.insert(GdiObject::Brush(brush), e.index)?;
             }
             Record::Font(raw) => self.insert(GdiObject::Font(parse_font(raw)), e.index)?,
             Record::Points(f, pts) => {
                 let p: Vec<_> = pts.iter().map(|p| self.map(*p)).collect();
+                let pen = self.mapped_pen();
                 if *f == META_POLYLINE {
-                    r.polyline(&p, &self.dc.pen, self.clip())?
+                    r.polyline(&p, &pen, self.clip())?
                 } else {
                     r.polygon(
                         &p,
-                        &self.dc.pen,
+                        &pen,
                         &self.dc.brush,
                         self.dc.polygon_fill_mode,
                         self.clip(),
@@ -438,18 +509,20 @@ impl Player {
             }
             Record::PolyPolygon { counts, points } => {
                 let mut at = 0;
+                let mut polygons = Vec::with_capacity(counts.len());
                 for c in counts {
                     let end = at + usize::from(*c);
                     let p: Vec<_> = points[at..end].iter().map(|p| self.map(*p)).collect();
-                    r.polygon(
-                        &p,
-                        &self.dc.pen,
-                        &self.dc.brush,
-                        self.dc.polygon_fill_mode,
-                        self.clip(),
-                    )?;
+                    polygons.push(p);
                     at = end;
                 }
+                r.poly_polygon(
+                    &polygons,
+                    &self.mapped_pen(),
+                    &self.dc.brush,
+                    self.dc.polygon_fill_mode,
+                    self.clip(),
+                )?;
             }
             Record::Text {
                 extended,
@@ -474,25 +547,54 @@ impl Player {
                     "approximate_text_metrics",
                     "text positioning uses SVG font metrics and may differ from Windows GDI",
                 );
+                let logical_position = if self.dc.text_align & 0x0001 != 0 {
+                    self.dc.current_position
+                } else {
+                    *position
+                };
+                let mapped_rect = clip.map(|c| self.map_rect(c).normalized());
                 let run = metafile_core::TextRun {
-                    position: self.map(*position),
+                    position: self.map(logical_position),
                     text: enc,
-                    font: self.dc.font.clone(),
+                    font: self.mapped_font(),
                     color: self.dc.text_color,
-                    background: if self.dc.background_opaque {
+                    background: if self.dc.background_opaque || (*extended && options & 0x0002 != 0)
+                    {
                         Some(self.dc.background_color)
                     } else {
                         None
                     },
+                    background_rect: if *extended && options & 0x0002 != 0 {
+                        mapped_rect
+                    } else {
+                        None
+                    },
                     align: self.dc.text_align,
-                    clip: clip.map(|c| self.map_rect(c)).or(self.clip()),
-                    dx: dx.iter().map(|x| f64::from(*x)).collect(),
+                    clip: if *extended && options & 0x0004 != 0 {
+                        mapped_rect
+                    } else {
+                        self.clip()
+                    },
+                    dx: dx
+                        .iter()
+                        .map(|x| {
+                            self.dc
+                                .mapping
+                                .transform_vector(metafile_core::Vector::new(f64::from(*x), 0.0))
+                                .x
+                        })
+                        .collect(),
                 };
                 r.text(&run)?;
-                if *extended && options & 0x0002 != 0 { /* clipping carried in run */ }
+                if self.dc.text_align & 0x0001 != 0 && !dx.is_empty() {
+                    self.dc.current_position.x += dx.iter().map(|x| f64::from(*x)).sum::<f64>();
+                }
             }
-            Record::Bitmap { function, params } => self.bitmap(*function, params, e, r, d)?,
-            Record::Escape { function, data } => self.warn(
+            Record::Bitmap { function, params } => {
+                self.bitmap(*function, params, e, r, d, strict)?
+            }
+            Record::Escape { function, data } => self.unsupported(
+                strict,
                 d,
                 e,
                 "unsupported_escape",
@@ -500,7 +602,7 @@ impl Player {
                     "escape function {function:#06x} with {} data bytes skipped",
                     data.len()
                 ),
-            ),
+            )?,
             Record::Unknown(f, p) => {
                 if strict {
                     return Err(MetafileError::UnsupportedCriticalFeature(format!(
@@ -524,13 +626,34 @@ impl Player {
         Ok(())
     }
     fn map(&self, p: Point) -> Point {
-        self.dc.mapping.transform(p)
+        self.dc.mapping.transform_point(p)
     }
     fn map_rect(&self, r: Rect) -> Rect {
         self.dc.mapping.transform_rect(r)
     }
     fn clip(&self) -> Option<Rect> {
         self.dc.clip
+    }
+    fn mapped_pen(&self) -> Pen {
+        let mut pen = self.dc.pen.clone();
+        pen.width = self
+            .dc
+            .mapping
+            .transform_vector(metafile_core::Vector::new(pen.width, 0.0))
+            .x
+            .abs()
+            .max(1.0);
+        pen
+    }
+    fn mapped_font(&self) -> Font {
+        let mut font = self.dc.font.clone();
+        let extent = self
+            .dc
+            .mapping
+            .transform_vector(metafile_core::Vector::new(font.width, font.height));
+        font.width = extent.x.abs();
+        font.height = extent.y.abs();
+        font
     }
     fn insert(&mut self, o: GdiObject, _index: usize) -> Result<()> {
         if let Some(slot) = self.objects.iter_mut().find(|x| x.is_none()) {
@@ -580,7 +703,34 @@ impl Player {
             }
         }
     }
-    fn delete(&mut self, h: u16, index: usize) -> Result<()> {
+    fn delete(
+        &mut self,
+        h: u16,
+        entry: &RecordEntry<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+        strict: bool,
+    ) -> Result<()> {
+        let index = entry.index;
+        let selected = |dc: &DeviceContext| {
+            dc.selected_pen == Some(h)
+                || dc.selected_brush == Some(h)
+                || dc.selected_font == Some(h)
+        };
+        if selected(&self.dc) || self.stack.iter().any(selected) {
+            if strict {
+                return Err(MetafileError::ObjectInUse {
+                    handle: h,
+                    record_index: index,
+                });
+            }
+            self.warn(
+                diagnostics,
+                entry,
+                "delete_selected_object",
+                "selected object was not deleted",
+            );
+            return Ok(());
+        }
         let slot =
             self.objects
                 .get_mut(usize::from(h))
@@ -603,29 +753,29 @@ impl Player {
         } else {
             usize::try_from(n).ok().and_then(|v| v.checked_sub(1))
         };
-        let target = target.ok_or(MetafileError::InvalidObjectHandle {
-            handle: n as u16,
+        let invalid = || MetafileError::InvalidRestoreDc {
+            value: n,
             record_index: index,
-        })?;
+            stack_depth: self.stack.len(),
+        };
+        let target = target.ok_or_else(invalid)?;
         if target >= self.stack.len() {
-            return Err(MetafileError::InvalidObjectHandle {
-                handle: n as u16,
-                record_index: index,
-            });
+            return Err(invalid());
         }
         self.dc = self.stack[target].clone();
         self.stack.truncate(target);
         Ok(())
     }
     fn intersect_clip(&mut self, b: Rect) {
+        let b = b.normalized();
         self.dc.clip = Some(match self.dc.clip {
             None => b,
-            Some(a) => Rect {
-                left: a.left.max(b.left),
-                top: a.top.max(b.top),
-                right: a.right.min(b.right),
-                bottom: a.bottom.min(b.bottom),
-            },
+            Some(a) => a.intersection(b).unwrap_or(Rect {
+                left: b.left,
+                top: b.top,
+                right: b.left,
+                bottom: b.top,
+            }),
         })
     }
     fn warn(&mut self, d: &mut Vec<Diagnostic>, e: &RecordEntry<'_>, code: &str, msg: &str) {
@@ -655,9 +805,11 @@ impl Player {
         e: &RecordEntry<'_>,
         r: &mut dyn Renderer,
         d: &mut Vec<Diagnostic>,
+        strict: bool,
     ) -> Result<()> {
         if f != META_STRETCHDIB {
-            self.warn(
+            self.unsupported(
+                strict,
                 d,
                 e,
                 "unsupported_bitmap_record",
@@ -665,35 +817,58 @@ impl Player {
                     "{} is parsed but not rendered; META_STRETCHDIB is supported",
                     name(f)
                 ),
-            );
+            )?;
             return Ok(());
         }
         let mut q = Reader::new(p);
-        let _rop = q.u32()?;
-        let _usage = q.u16()?;
-        let _src_h = q.i16()?;
-        let _src_w = q.i16()?;
-        let _src_y = q.i16()?;
-        let _src_x = q.i16()?;
+        let rop = q.u32()?;
+        let usage = q.u16()?;
+        let src_h = q.i16()?;
+        let src_w = q.i16()?;
+        let src_y = q.i16()?;
+        let src_x = q.i16()?;
         let dst_h = q.i16()?;
         let dst_w = q.i16()?;
         let dst_y = q.i16()?;
         let dst_x = q.i16()?;
         let dib = &p[q.position()..];
+        if rop != 0x00cc_0020 {
+            self.unsupported(
+                strict,
+                d,
+                e,
+                "unsupported_bitmap_rop",
+                &format!("raster operation {rop:#010x} is not SRCCOPY; bitmap skipped"),
+            )?;
+            return Ok(());
+        }
+        if usage != 0 {
+            self.unsupported(
+                strict,
+                d,
+                e,
+                "unsupported_dib_color_usage",
+                "DIB_PAL_COLORS is not supported; bitmap skipped",
+            )?;
+            return Ok(());
+        }
         match dib::decode_dib(dib, e.index, &self.limits) {
-            Ok(bitmap) => r.bitmap(
-                self.map_rect(Rect {
-                    left: f64::from(dst_x),
-                    top: f64::from(dst_y),
-                    right: f64::from(dst_x + dst_w),
-                    bottom: f64::from(dst_y + dst_h),
-                }),
-                &bitmap,
-                self.clip(),
-            ),
+            Ok(bitmap) => {
+                let bitmap = crop_bitmap(bitmap, src_x, src_y, src_w, src_h, e.index)?;
+                r.bitmap(
+                    self.map_rect(Rect {
+                        left: f64::from(dst_x),
+                        top: f64::from(dst_y),
+                        right: f64::from(dst_x) + f64::from(dst_w),
+                        bottom: f64::from(dst_y) + f64::from(dst_h),
+                    }),
+                    &bitmap,
+                    self.clip(),
+                )
+            }
             Err(err) => {
-                if matches!(err, MetafileError::InvalidBitmap { .. }) {
-                    self.warn(d, e, "unsupported_or_invalid_dib", &err.to_string());
+                if matches!(err, MetafileError::UnsupportedBitmap { .. }) {
+                    self.unsupported(strict, d, e, "unsupported_dib", &err.to_string())?;
                     Ok(())
                 } else {
                     Err(err)
@@ -701,6 +876,132 @@ impl Player {
             }
         }
     }
+    fn unsupported(
+        &mut self,
+        strict: bool,
+        diagnostics: &mut Vec<Diagnostic>,
+        entry: &RecordEntry<'_>,
+        code: &str,
+        message: &str,
+    ) -> Result<()> {
+        if strict {
+            return Err(MetafileError::UnsupportedCriticalFeature(format!(
+                "{} at record {}: {message}",
+                name(entry.function),
+                entry.index
+            )));
+        }
+        self.warn(diagnostics, entry, code, message);
+        Ok(())
+    }
+    fn set_map_mode(
+        &mut self,
+        mode: i16,
+        entry: &RecordEntry<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+        strict: bool,
+    ) -> Result<()> {
+        let scale = match mode {
+            1 => Some((1.0, 1.0)),
+            2 => Some((96.0 / 254.0, -96.0 / 254.0)),
+            3 => Some((96.0 / 2540.0, -96.0 / 2540.0)),
+            4 => Some((0.96, -0.96)),
+            5 => Some((0.096, -0.096)),
+            6 => Some((96.0 / 1440.0, -96.0 / 1440.0)),
+            7 | 8 => None,
+            _ => {
+                self.unsupported(
+                    strict,
+                    diagnostics,
+                    entry,
+                    "unsupported_map_mode",
+                    &format!("map mode {mode} is unknown"),
+                )?;
+                None
+            }
+        };
+        self.dc.map_mode = mode;
+        if let Some((x, y)) = scale {
+            self.dc.mapping.window_extent = Point::new(1.0, 1.0);
+            self.dc.mapping.viewport_extent = Point::new(x, y);
+        }
+        Ok(())
+    }
+    fn adjust_isotropic(&mut self) {
+        if self.dc.map_mode != 7
+            || self.dc.mapping.window_extent.x == 0.0
+            || self.dc.mapping.window_extent.y == 0.0
+        {
+            return;
+        }
+        let sx = self.dc.mapping.viewport_extent.x / self.dc.mapping.window_extent.x;
+        let sy = self.dc.mapping.viewport_extent.y / self.dc.mapping.window_extent.y;
+        let magnitude = sx.abs().min(sy.abs());
+        self.dc.mapping.viewport_extent.x =
+            magnitude.copysign(sx) * self.dc.mapping.window_extent.x;
+        self.dc.mapping.viewport_extent.y =
+            magnitude.copysign(sy) * self.dc.mapping.window_extent.y;
+    }
+}
+
+fn crop_bitmap(
+    bitmap: metafile_core::Bitmap,
+    x: i16,
+    y: i16,
+    width: i16,
+    height: i16,
+    record_index: usize,
+) -> Result<metafile_core::Bitmap> {
+    if x < 0 || y < 0 || width <= 0 || height <= 0 {
+        return Err(MetafileError::InvalidBitmap {
+            record_index,
+            message: "invalid source crop rectangle".into(),
+        });
+    }
+    let x = u32::from(x.unsigned_abs());
+    let y = u32::from(y.unsigned_abs());
+    let width = u32::from(width.unsigned_abs());
+    let height = u32::from(height.unsigned_abs());
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| MetafileError::InvalidBitmap {
+            record_index,
+            message: "source crop overflow".into(),
+        })?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| MetafileError::InvalidBitmap {
+            record_index,
+            message: "source crop overflow".into(),
+        })?;
+    if right > bitmap.width || bottom > bitmap.height {
+        return Err(MetafileError::InvalidBitmap {
+            record_index,
+            message: "source crop lies outside bitmap".into(),
+        });
+    }
+    if x == 0 && y == 0 && width == bitmap.width && height == bitmap.height {
+        return Ok(bitmap);
+    }
+    let capacity = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    let mut rgba = Vec::with_capacity(usize::try_from(capacity).map_err(|_| {
+        MetafileError::InvalidBitmap {
+            record_index,
+            message: "source crop allocation overflow".into(),
+        }
+    })?);
+    for row in y..bottom {
+        let start = (u64::from(row) * u64::from(bitmap.width) + u64::from(x)) * 4;
+        let end = start + u64::from(width) * 4;
+        rgba.extend_from_slice(&bitmap.rgba[start as usize..end as usize]);
+    }
+    Ok(metafile_core::Bitmap {
+        width,
+        height,
+        rgba,
+    })
 }
 
 fn color(v: u32) -> Color {

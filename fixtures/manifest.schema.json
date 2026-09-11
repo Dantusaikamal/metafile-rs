@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "metafile-rs fixture manifest",
+  "type": "object",
+  "required": ["fixtures"],
+  "properties": {
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "file", "origin", "licenseOrPermission", "generator", "expectedFormat", "placeable", "notes"],
+        "properties": {
+          "name": { "type": "string" },
+          "file": { "type": "string" },
+          "origin": { "type": "string" },
+          "licenseOrPermission": { "type": "string" },
+          "generator": { "type": "string" },
+          "expectedFormat": { "enum": ["wmf"] },
+          "placeable": { "type": "boolean" },
+          "notes": { "type": "string" },
+          "referenceRenderer": { "type": ["string", "null"] },
+          "referenceImage": { "type": ["string", "null"] },
+          "referenceImageProvenance": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

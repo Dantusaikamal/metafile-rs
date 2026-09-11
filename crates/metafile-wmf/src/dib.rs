@@ -18,15 +18,18 @@ pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> 
     }
     let width = r.i32()?;
     let signed_height = r.i32()?;
-    let _planes = r.u16()?;
+    let planes = r.u16()?;
     let bpp = r.u16()?;
     let compression = r.u32()?;
-    let _image_size = r.u32()?;
-    r.skip(16)?;
+    let image_size = r.u32()?;
+    r.skip(8)?; // horizontal and vertical pixels-per-meter
     let colors_used = r.u32()?;
-    r.skip(4)?;
+    r.skip(4)?; // important color count
     if width <= 0 || signed_height == 0 {
         return Err(bad("invalid dimensions"));
+    }
+    if planes != 1 {
+        return Err(bad("BITMAPINFOHEADER planes must equal 1"));
     }
     let w = u32::try_from(width).map_err(|_| bad("negative width"))?;
     let h = signed_height.unsigned_abs();
@@ -48,10 +51,19 @@ pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> 
         });
     }
     if compression != 0 {
-        return Err(bad("unsupported DIB compression"));
+        return Err(MetafileError::UnsupportedBitmap {
+            record_index,
+            message: format!("DIB compression {compression} is not supported"),
+        });
     }
     if !matches!(bpp, 1 | 4 | 8 | 24 | 32) {
-        return Err(bad("unsupported bits-per-pixel"));
+        return Err(MetafileError::UnsupportedBitmap {
+            record_index,
+            message: format!("{bpp}-bit DIB pixels are not supported"),
+        });
+    }
+    if bpp <= 8 && colors_used > (1u32 << bpp) {
+        return Err(bad("colors_used exceeds the indexed pixel range"));
     }
     let palette_count = if bpp <= 8 {
         if colors_used == 0 {
@@ -87,6 +99,11 @@ pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> 
         .ok_or_else(|| bad("bitmap size overflow"))?;
     if data.len() - data_offset < needed {
         return Err(bad("truncated pixel data"));
+    }
+    if image_size != 0 && u64::from(image_size) < needed as u64 {
+        return Err(bad(
+            "declared image size is smaller than required pixel data",
+        ));
     }
     let palette = &data[usize::try_from(header_size).unwrap() + mask_bytes..data_offset];
     let src = &data[data_offset..data_offset + needed];
@@ -162,5 +179,42 @@ mod tests {
     #[test]
     fn rejects_truncated() {
         assert!(decode_dib(&[40, 0, 0, 0], 2, &ResourceLimits::default()).is_err());
+    }
+    #[test]
+    fn validates_planes_palette_and_image_size() {
+        let base = || {
+            let mut d = vec![0u8; 44];
+            d[0..4].copy_from_slice(&40u32.to_le_bytes());
+            d[4..8].copy_from_slice(&1i32.to_le_bytes());
+            d[8..12].copy_from_slice(&1i32.to_le_bytes());
+            d[12..14].copy_from_slice(&1u16.to_le_bytes());
+            d[14..16].copy_from_slice(&32u16.to_le_bytes());
+            d
+        };
+        let mut planes = base();
+        planes[12..14].copy_from_slice(&2u16.to_le_bytes());
+        assert!(matches!(
+            decode_dib(&planes, 1, &ResourceLimits::default()),
+            Err(MetafileError::InvalidBitmap { .. })
+        ));
+
+        let mut image_size = base();
+        image_size[20..24].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            decode_dib(&image_size, 1, &ResourceLimits::default()),
+            Err(MetafileError::InvalidBitmap { .. })
+        ));
+
+        let mut palette = vec![0u8; 48];
+        palette[0..4].copy_from_slice(&40u32.to_le_bytes());
+        palette[4..8].copy_from_slice(&1i32.to_le_bytes());
+        palette[8..12].copy_from_slice(&1i32.to_le_bytes());
+        palette[12..14].copy_from_slice(&1u16.to_le_bytes());
+        palette[14..16].copy_from_slice(&1u16.to_le_bytes());
+        palette[32..36].copy_from_slice(&3u32.to_le_bytes());
+        assert!(matches!(
+            decode_dib(&palette, 1, &ResourceLimits::default()),
+            Err(MetafileError::InvalidBitmap { .. })
+        ));
     }
 }

@@ -8,6 +8,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 metafile-wmf = { path = "../crates/metafile-wmf" }
+metafile = { path = "../crates/metafile" }
+metafile-core = { path = "../crates/metafile-core" }
 [[bin]]
 name = "wmf"
 path = "fuzz_targets/wmf.rs"
@@ -15,4 +17,3 @@ test = false
 doc = false
 bench = false
 [workspace]
-
