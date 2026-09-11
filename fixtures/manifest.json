@@ -1,4 +1,37 @@
 {
   "$schema": "./manifest.schema.json",
-  "fixtures": []
+  "fixtures": [
+    {
+      "name": "Windows GDI vector primitives", "file": "real-world/windows-gdi-vector.wmf",
+      "origin": "Generated specifically for metafile-rs qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "32741b34cde86e0156a7449fa8de2f03f223527873613260814d2b268adddc72", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["cosmetic pen", "solid brush", "rectangle", "ellipse", "line"], "notes": "GDI-produced standard WMF wrapped in a project-owned Aldus placeable header", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI arcs", "file": "real-world/windows-gdi-arcs.wmf",
+      "origin": "Generated specifically for metafile-rs qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "39e7f67cc7051802d94f08d441dd0e45aea37454b39c3e4c3f772b71dda8f04f", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["arc", "pie", "chord", "non-square ellipse", "near-degenerate arc"], "notes": "GDI-produced standard WMF wrapped in a project-owned Aldus placeable header", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI PolyPolygon", "file": "real-world/windows-gdi-polypolygon.wmf",
+      "origin": "Generated specifically for metafile-rs qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "62cb663c1f34386b9c5e6f502fedf734d7d613dcb1fe9b64609d1f72798b607a", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["PolyPolygon", "nested hole", "ALTERNATE fill", "mixed polygon orientation"], "notes": "GDI-produced standard WMF wrapped in a project-owned Aldus placeable header", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI text alignment", "file": "real-world/windows-gdi-text.wmf",
+      "origin": "Generated specifically for metafile-rs qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "f83439ade191cf5faf47de45116b4c2dbbe4b06cf91f3868e9c26ae929df2679", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["TextOut", "left/top", "center/top", "right/baseline", "XML escaping"], "notes": "Font metrics remain approximate; GDI-produced standard WMF wrapped in a placeable header", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI bitmap stretching", "file": "real-world/windows-gdi-bitmap.wmf",
+      "origin": "Generated specifically for metafile-rs qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW and StretchDIBits via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "7a26b21d516b5214cf90ecb7596a4b14b1fac7b1df8e7df1d8e1700afb59ca71", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["24-bit BI_RGB", "bottom-up DIB", "COLORONCOLOR", "scaled output", "negative destination width"], "notes": "Reference rasterizer adds interpolation while scaling the metafile; bitmap pixel metrics are therefore manually reviewed", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI large vector stream", "file": "real-world/windows-gdi-large-vector.wmf",
+      "origin": "Generated specifically for metafile-rs performance qualification", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI CreateMetaFileW via tools/windows-reference", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "a7e807c449eb1754e5880e34d287068f499ea3ca8e3dc8feecd65a5460282554", "expectedFormat": "wmf", "expectedSupport": "render", "placeable": true, "notableFeatures": ["5000 LineTo records", "large record stream", "performance linearity"], "notes": "GDI-produced stress fixture; not represented as a typical Office document", "referenceRenderer": "Windows GDI+ WMF playback, white 600x400 surface", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI+ EMF future-format sample", "file": "real-world/windows-gdiplus-emf.emf",
+      "origin": "Generated specifically for metafile-rs future-format corpus", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI+ System.Drawing Metafile with EmfType.EmfOnly", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "a18b6135f2926497a37b5683322cf0c708ecc18b1afb74f91bf2a66d0089155a", "expectedFormat": "emf", "expectedSupport": "unsupported", "placeable": null, "notableFeatures": ["EMF header", "ellipse", "rectangle", "text"], "notes": "Catalogued and classified only; the 0.1.0 Rust engine intentionally rejects EMF", "referenceRenderer": "Windows GDI+", "referenceImage": null, "referenceImageProvenance": null
+    },
+    {
+      "name": "Windows GDI+ EMF+ Dual future-format sample", "file": "real-world/windows-gdiplus-emfplus.emf",
+      "origin": "Generated specifically for metafile-rs future-format corpus", "licenseOrPermission": "MIT OR Apache-2.0 with this repository", "generator": "Windows GDI+ System.Drawing Metafile with EmfType.EmfPlusDual", "generatedByUs": true, "extractedFromOwnedDocument": false, "sourceUrl": null, "acquiredDate": "2026-09-11", "sha256": "1c043d98e176e24a03207a98c7f8e55baf532107c8f506e52de6943d9bf10b86", "expectedFormat": "emfplus", "expectedSupport": "unsupported", "placeable": null, "notableFeatures": ["EMF+ Dual records", "ellipse", "rectangle", "text"], "notes": "Catalogued by embedded EMF+ records only; the 0.1.0 Rust engine intentionally rejects EMF+", "referenceRenderer": "Windows GDI+", "referenceImage": null, "referenceImageProvenance": null
+    }
+  ]
 }

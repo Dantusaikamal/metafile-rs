@@ -140,6 +140,8 @@ pub enum Severity {
 #[serde(rename_all = "lowercase")]
 pub enum MetafileFormat {
     Wmf,
+    Emf,
+    EmfPlus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +304,8 @@ pub enum PenStyle {
 pub struct Pen {
     pub style: PenStyle,
     pub width: f64,
+    /// A cosmetic pen remains one output-device pixel wide regardless of mapping scale.
+    pub cosmetic: bool,
     pub color: Color,
 }
 impl Default for Pen {
@@ -309,6 +313,7 @@ impl Default for Pen {
         Self {
             style: PenStyle::Solid,
             width: 1.0,
+            cosmetic: true,
             color: Color::BLACK,
         }
     }
@@ -497,9 +502,24 @@ pub struct TextRun {
     pub color: Color,
     pub background: Option<Color>,
     pub background_rect: Option<Rect>,
-    pub align: u16,
+    pub horizontal_align: HorizontalTextAlignment,
+    pub vertical_align: VerticalTextAlignment,
     pub clip: Option<Rect>,
     pub dx: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HorizontalTextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalTextAlignment {
+    Top,
+    Bottom,
+    Baseline,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -507,6 +527,13 @@ pub struct Bitmap {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitmapSampling {
+    Auto,
+    Pixelated,
+    Smooth,
 }
 
 pub trait Renderer {
@@ -551,7 +578,13 @@ pub trait Renderer {
     ) -> Result<()>;
     fn pixel(&mut self, point: Point, color: Color, clip: Option<Rect>) -> Result<()>;
     fn text(&mut self, run: &TextRun) -> Result<()>;
-    fn bitmap(&mut self, dest: Rect, bitmap: &Bitmap, clip: Option<Rect>) -> Result<()>;
+    fn bitmap(
+        &mut self,
+        dest: Rect,
+        bitmap: &Bitmap,
+        sampling: BitmapSampling,
+        clip: Option<Rect>,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -10,6 +10,10 @@ renderer events and serializes deterministic self-contained SVG. The small
 `to_svg` API. `metafile-wasm` maps byte slices and serializable Rust values to
 JavaScript values through that facade.
 
+The facade owns a format-neutral `MetafileInfo` envelope and nests
+parser-specific metadata, so adding EMF does not require changing the
+top-level inspection/render result shape.
+
 WMF records never append SVG directly. Playback mutates a complete device
 context and emits mapped graphics primitives. This boundary is intended for
 future EMF and EMF+ parsers.

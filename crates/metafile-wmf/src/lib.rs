@@ -7,8 +7,9 @@ mod record;
 use encoding_rs::{Encoding, WINDOWS_1252};
 pub use metafile_core::RenderOptions;
 use metafile_core::{
-    ArcKind, Brush, BrushStyle, Color, DeviceContext, Diagnostic, Font, GdiObject, MetafileError,
-    MetafileFormat, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result,
+    ArcKind, BitmapSampling, Brush, BrushStyle, Color, DeviceContext, Diagnostic, Font, GdiObject,
+    HorizontalTextAlignment, MetafileError, MetafileFormat, Pen, PenStyle, Point, Rect, Renderer,
+    ResourceLimits, Result, VerticalTextAlignment,
 };
 use reader::Reader;
 use record::*;
@@ -456,9 +457,7 @@ impl Player {
                     self.map(*start),
                     self.map(*end),
                     kind,
-                    self.dc.mapping.viewport_extent.x * self.dc.mapping.viewport_extent.y
-                        / (self.dc.mapping.window_extent.x * self.dc.mapping.window_extent.y)
-                        < 0.0,
+                    false,
                     &pen,
                     &self.dc.brush,
                     self.clip(),
@@ -469,14 +468,44 @@ impl Player {
                 style,
                 width,
                 color: c,
-            } => self.insert(
-                GdiObject::Pen(Pen {
-                    style: pen_style(*style),
-                    width: f64::from(width.abs()).max(1.0),
-                    color: color(*c),
-                }),
-                e.index,
-            )?,
+            } => {
+                let style = pen_style(*style);
+                match style {
+                    PenStyle::InsideFrame => self.unsupported(
+                        strict,
+                        d,
+                        e,
+                        "approximate_inside_frame_pen",
+                        "PS_INSIDEFRAME is rendered as a centered solid SVG stroke",
+                    )?,
+                    PenStyle::Unknown(value) => self.unsupported(
+                        strict,
+                        d,
+                        e,
+                        "unsupported_pen_style",
+                        &format!("pen style {value} is not reproduced"),
+                    )?,
+                    PenStyle::Dash | PenStyle::Dot | PenStyle::DashDot | PenStyle::DashDotDot => {
+                        self.unsupported(
+                            strict,
+                            d,
+                            e,
+                            "approximate_pen_dash",
+                            "GDI cosmetic dash patterns are approximated with SVG dash arrays",
+                        )?;
+                    }
+                    PenStyle::Solid | PenStyle::Null => {}
+                }
+                self.insert(
+                    GdiObject::Pen(Pen {
+                        style,
+                        width: f64::from(width.unsigned_abs()),
+                        cosmetic: *width == 0,
+                        color: color(*c),
+                    }),
+                    e.index,
+                )?;
+            }
             Record::Brush {
                 style,
                 color: c,
@@ -547,6 +576,24 @@ impl Player {
                     "approximate_text_metrics",
                     "text positioning uses SVG font metrics and may differ from Windows GDI",
                 );
+                if self.dc.mapper_flags != 0 {
+                    self.unsupported(
+                        strict,
+                        d,
+                        e,
+                        "unsupported_mapper_flags",
+                        "font matching requested by META_SETMAPPERFLAGS cannot be reproduced without host font APIs",
+                    )?;
+                }
+                if self.dc.text_align & 0x0100 != 0 {
+                    self.unsupported(
+                        strict,
+                        d,
+                        e,
+                        "unsupported_rtl_text",
+                        "TA_RTLREADING is not reproduced by the current SVG text renderer",
+                    )?;
+                }
                 let logical_position = if self.dc.text_align & 0x0001 != 0 {
                     self.dc.current_position
                 } else {
@@ -555,7 +602,7 @@ impl Player {
                 let mapped_rect = clip.map(|c| self.map_rect(c).normalized());
                 let run = metafile_core::TextRun {
                     position: self.map(logical_position),
-                    text: enc,
+                    text: enc.clone(),
                     font: self.mapped_font(),
                     color: self.dc.text_color,
                     background: if self.dc.background_opaque || (*extended && options & 0x0002 != 0)
@@ -569,7 +616,8 @@ impl Player {
                     } else {
                         None
                     },
-                    align: self.dc.text_align,
+                    horizontal_align: horizontal_text_alignment(self.dc.text_align),
+                    vertical_align: vertical_text_alignment(self.dc.text_align),
                     clip: if *extended && options & 0x0004 != 0 {
                         mapped_rect
                     } else {
@@ -586,8 +634,21 @@ impl Player {
                         .collect(),
                 };
                 r.text(&run)?;
-                if self.dc.text_align & 0x0001 != 0 && !dx.is_empty() {
-                    self.dc.current_position.x += dx.iter().map(|x| f64::from(*x)).sum::<f64>();
+                if self.dc.text_align & 0x0001 != 0 {
+                    let advance = if dx.is_empty() {
+                        self.warn(
+                            d,
+                            e,
+                            "approximate_update_cp",
+                            "TA_UPDATECP advance is estimated because Windows GDI font metrics are unavailable",
+                        );
+                        approximate_text_advance(&enc, &self.dc.font)
+                    } else {
+                        dx.iter().map(|x| f64::from(*x)).sum::<f64>()
+                    };
+                    let angle = f64::from(self.dc.font.escapement_tenths).to_radians() / 10.0;
+                    self.dc.current_position.x += advance * angle.cos();
+                    self.dc.current_position.y -= advance * angle.sin();
                 }
             }
             Record::Bitmap { function, params } => {
@@ -636,13 +697,16 @@ impl Player {
     }
     fn mapped_pen(&self) -> Pen {
         let mut pen = self.dc.pen.clone();
-        pen.width = self
-            .dc
-            .mapping
-            .transform_vector(metafile_core::Vector::new(pen.width, 0.0))
-            .x
-            .abs()
-            .max(1.0);
+        pen.width = if pen.cosmetic {
+            1.0
+        } else {
+            self.dc
+                .mapping
+                .transform_vector(metafile_core::Vector::new(pen.width, 0.0))
+                .x
+                .abs()
+                .max(1.0)
+        };
         pen
     }
     fn mapped_font(&self) -> Font {
@@ -853,18 +917,62 @@ impl Player {
             return Ok(());
         }
         match dib::decode_dib(dib, e.index, &self.limits) {
-            Ok(bitmap) => {
-                let bitmap = crop_bitmap(bitmap, src_x, src_y, src_w, src_h, e.index)?;
-                r.bitmap(
-                    self.map_rect(Rect {
-                        left: f64::from(dst_x),
-                        top: f64::from(dst_y),
-                        right: f64::from(dst_x) + f64::from(dst_w),
-                        bottom: f64::from(dst_y) + f64::from(dst_h),
-                    }),
-                    &bitmap,
-                    self.clip(),
-                )
+            Ok(decoded) => {
+                let bitmap = crop_bitmap(
+                    decoded.bitmap,
+                    decoded.top_down,
+                    src_x,
+                    src_y,
+                    src_w,
+                    src_h,
+                    e.index,
+                )?;
+                let mapped_dest = self.map_rect(Rect {
+                    left: f64::from(dst_x),
+                    top: f64::from(dst_y),
+                    right: f64::from(dst_x) + f64::from(dst_w),
+                    bottom: f64::from(dst_y) + f64::from(dst_h),
+                });
+                let scaled = (mapped_dest.width() - f64::from(bitmap.width)).abs() > f64::EPSILON
+                    || (mapped_dest.height() - f64::from(bitmap.height)).abs() > f64::EPSILON;
+                let sampling = if scaled {
+                    match self.dc.stretch_mode {
+                        3 => BitmapSampling::Pixelated,
+                        4 => {
+                            self.unsupported(
+                                strict,
+                                d,
+                                e,
+                                "approximate_stretch_mode",
+                                "HALFTONE is approximated with smooth SVG image interpolation",
+                            )?;
+                            BitmapSampling::Smooth
+                        }
+                        1 | 2 => {
+                            self.unsupported(
+                                strict,
+                                d,
+                                e,
+                                "unsupported_stretch_mode",
+                                "monochrome stretch modes are not reproduced by SVG image interpolation",
+                            )?;
+                            BitmapSampling::Auto
+                        }
+                        mode => {
+                            self.unsupported(
+                                strict,
+                                d,
+                                e,
+                                "unsupported_stretch_mode",
+                                &format!("invalid or unsupported stretch mode {mode}"),
+                            )?;
+                            BitmapSampling::Auto
+                        }
+                    }
+                } else {
+                    BitmapSampling::Auto
+                };
+                r.bitmap(mapped_dest, &bitmap, sampling, self.clip())
             }
             Err(err) => {
                 if matches!(err, MetafileError::UnsupportedBitmap { .. }) {
@@ -946,41 +1054,58 @@ impl Player {
 
 fn crop_bitmap(
     bitmap: metafile_core::Bitmap,
+    top_down: bool,
     x: i16,
     y: i16,
     width: i16,
     height: i16,
     record_index: usize,
 ) -> Result<metafile_core::Bitmap> {
-    if x < 0 || y < 0 || width <= 0 || height <= 0 {
-        return Err(MetafileError::InvalidBitmap {
-            record_index,
-            message: "invalid source crop rectangle".into(),
-        });
+    let bad = |message: &str| MetafileError::InvalidBitmap {
+        record_index,
+        message: message.into(),
+    };
+    if width == 0 || height == 0 {
+        return Err(bad("source crop has a zero extent"));
     }
-    let x = u32::from(x.unsigned_abs());
-    let y = u32::from(y.unsigned_abs());
-    let width = u32::from(width.unsigned_abs());
-    let height = u32::from(height.unsigned_abs());
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| MetafileError::InvalidBitmap {
-            record_index,
-            message: "source crop overflow".into(),
-        })?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| MetafileError::InvalidBitmap {
-            record_index,
-            message: "source crop overflow".into(),
-        })?;
+    let interval = |origin: i16, extent: i16, maximum: u32| -> Result<(u32, u32, bool)> {
+        let origin = i32::from(origin);
+        let end = origin
+            .checked_add(i32::from(extent))
+            .ok_or_else(|| bad("source crop overflow"))?;
+        let start = origin.min(end);
+        let finish = origin.max(end);
+        if start < 0 || finish > i32::try_from(maximum).unwrap_or(i32::MAX) {
+            return Err(bad("source crop lies outside bitmap"));
+        }
+        Ok((
+            u32::try_from(start).map_err(|_| bad("source crop overflow"))?,
+            u32::try_from(finish).map_err(|_| bad("source crop overflow"))?,
+            extent < 0,
+        ))
+    };
+    let (left, right, flip_x) = interval(x, width, bitmap.width)?;
+    let (native_top, native_bottom, flip_y) = interval(y, height, bitmap.height)?;
+    let (top, bottom) = if top_down {
+        (native_top, native_bottom)
+    } else {
+        (bitmap.height - native_bottom, bitmap.height - native_top)
+    };
     if right > bitmap.width || bottom > bitmap.height {
         return Err(MetafileError::InvalidBitmap {
             record_index,
             message: "source crop lies outside bitmap".into(),
         });
     }
-    if x == 0 && y == 0 && width == bitmap.width && height == bitmap.height {
+    let width = right - left;
+    let height = bottom - top;
+    if left == 0
+        && top == 0
+        && width == bitmap.width
+        && height == bitmap.height
+        && !flip_x
+        && !flip_y
+    {
         return Ok(bitmap);
     }
     let capacity = u64::from(width)
@@ -992,10 +1117,21 @@ fn crop_bitmap(
             message: "source crop allocation overflow".into(),
         }
     })?);
-    for row in y..bottom {
-        let start = (u64::from(row) * u64::from(bitmap.width) + u64::from(x)) * 4;
-        let end = start + u64::from(width) * 4;
-        rgba.extend_from_slice(&bitmap.rgba[start as usize..end as usize]);
+    for output_y in 0..height {
+        let row = if flip_y {
+            bottom - 1 - output_y
+        } else {
+            top + output_y
+        };
+        for output_x in 0..width {
+            let column = if flip_x {
+                right - 1 - output_x
+            } else {
+                left + output_x
+            };
+            let start = (u64::from(row) * u64::from(bitmap.width) + u64::from(column)) * 4;
+            rgba.extend_from_slice(&bitmap.rgba[start as usize..start as usize + 4]);
+        }
     }
     Ok(metafile_core::Bitmap {
         width,
@@ -1010,6 +1146,31 @@ fn color(v: u32) -> Color {
         ((v >> 8) & 255) as u8,
         ((v >> 16) & 255) as u8,
     )
+}
+
+fn horizontal_text_alignment(value: u16) -> HorizontalTextAlignment {
+    match value & 0x0006 {
+        0x0006 => HorizontalTextAlignment::Center,
+        0x0002 => HorizontalTextAlignment::Right,
+        _ => HorizontalTextAlignment::Left,
+    }
+}
+
+fn vertical_text_alignment(value: u16) -> VerticalTextAlignment {
+    match value & 0x0018 {
+        0x0018 => VerticalTextAlignment::Baseline,
+        0x0008 => VerticalTextAlignment::Bottom,
+        _ => VerticalTextAlignment::Top,
+    }
+}
+
+fn approximate_text_advance(text: &str, font: &Font) -> f64 {
+    let per_character = if font.width.abs() >= 1.0 {
+        font.width.abs()
+    } else {
+        font.height.abs().max(1.0) * 0.6
+    };
+    per_character * text.chars().count() as f64
 }
 fn pen_style(v: u16) -> PenStyle {
     match v & 15 {
@@ -1061,12 +1222,14 @@ fn stock_object(index: u16) -> Option<GdiObject> {
         6 => GdiObject::Pen(Pen {
             style: PenStyle::Solid,
             width: 1.0,
+            cosmetic: true,
             color: Color::WHITE,
         }),
         7 => GdiObject::Pen(Pen::default()),
         8 => GdiObject::Pen(Pen {
             style: PenStyle::Null,
             width: 1.0,
+            cosmetic: true,
             color: Color::BLACK,
         }),
         10..=17 => GdiObject::Font(Font::default()),

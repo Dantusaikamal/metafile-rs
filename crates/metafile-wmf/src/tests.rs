@@ -89,6 +89,23 @@ fn ext_text(
     rec(META_EXTTEXTOUT, &params)
 }
 
+fn create_pen(width: i16, color: u32) -> Vec<u8> {
+    let mut params = i16s(&[0, width, 0]);
+    params.extend(color.to_le_bytes());
+    rec(META_CREATEPENINDIRECT, &params)
+}
+
+fn text_out(text: &[u8], position: [i16; 2]) -> Vec<u8> {
+    let mut params = Vec::new();
+    params.extend((text.len() as u16).to_le_bytes());
+    params.extend(text);
+    if text.len() % 2 != 0 {
+        params.push(0);
+    }
+    params.extend(i16s(&position));
+    rec(META_TEXTOUT, &params)
+}
+
 #[test]
 fn inspects_standard_wmf() {
     let b = standard(&[eof()], 0);
@@ -256,6 +273,66 @@ fn save_restore_restores_mapping_and_position() {
     let r = to_svg(&b, Default::default()).unwrap();
     assert!(r.svg.contains("M 1 1 L 2 2"));
 }
+
+#[test]
+fn cosmetic_and_geometric_pen_widths_map_differently() {
+    let records = |width| {
+        vec![
+            create_pen(width, 0),
+            rec(META_SELECTOBJECT, &0u16.to_le_bytes()),
+            rec(META_SETMAPMODE, &8i16.to_le_bytes()),
+            rec(META_SETWINDOWEXT, &i16s(&[10, -10])),
+            rec(META_SETVIEWPORTEXT, &i16s(&[50, 50])),
+            rec(META_MOVETO, &i16s(&[0, 0])),
+            rec(META_LINETO, &i16s(&[1, 1])),
+            eof(),
+        ]
+    };
+    let cosmetic = to_svg(&standard(&records(0), 1), Default::default())
+        .unwrap()
+        .svg;
+    let geometric = to_svg(&standard(&records(1), 1), Default::default())
+        .unwrap()
+        .svg;
+    assert!(cosmetic.contains("stroke-width=\"1\""), "{cosmetic}");
+    assert!(geometric.contains("stroke-width=\"5\""), "{geometric}");
+}
+
+#[test]
+fn zero_width_pen_is_one_unit_in_mm_text() {
+    let b = standard(
+        &[
+            create_pen(0, 0),
+            rec(META_SELECTOBJECT, &0u16.to_le_bytes()),
+            rec(META_MOVETO, &i16s(&[0, 0])),
+            rec(META_LINETO, &i16s(&[5, 5])),
+            eof(),
+        ],
+        1,
+    );
+    let svg = to_svg(&b, Default::default()).unwrap().svg;
+    assert!(svg.contains("stroke-width=\"1\""));
+}
+
+#[test]
+fn saved_dc_restores_cosmetic_pen_selection() {
+    let b = standard(
+        &[
+            create_pen(0, 0),
+            create_pen(2, 0xff),
+            rec(META_SELECTOBJECT, &0u16.to_le_bytes()),
+            rec(META_SAVEDC, &[]),
+            rec(META_SELECTOBJECT, &1u16.to_le_bytes()),
+            rec(META_RESTOREDC, &(-1i16).to_le_bytes()),
+            rec(META_MOVETO, &i16s(&[0, 0])),
+            rec(META_LINETO, &i16s(&[1, 1])),
+            eof(),
+        ],
+        2,
+    );
+    let svg = to_svg(&b, Default::default()).unwrap().svg;
+    assert!(svg.contains("stroke=\"#000000\" stroke-width=\"1\""));
+}
 #[test]
 fn invalid_handle_is_error() {
     let b = standard(&[rec(META_SELECTOBJECT, &3u16.to_le_bytes()), eof()], 1);
@@ -302,6 +379,83 @@ fn renders_text_with_xml_escaping() {
         .diagnostics
         .iter()
         .any(|d| d.code == "approximate_text_metrics"));
+}
+
+#[test]
+fn text_alignment_modes_map_to_distinct_svg_semantics() {
+    let horizontal = [(0x0000, "start"), (0x0006, "middle"), (0x0002, "end")];
+    let vertical = [
+        (0x0000, "text-before-edge"),
+        (0x0018, "alphabetic"),
+        (0x0008, "text-after-edge"),
+    ];
+    for (horizontal_bits, anchor) in horizontal {
+        for (vertical_bits, baseline) in vertical {
+            let align = horizontal_bits | vertical_bits;
+            let b = standard(
+                &[
+                    rec(META_SETTEXTALIGN, &(align as u16).to_le_bytes()),
+                    text_out(b"A", [20, 30]),
+                    eof(),
+                ],
+                0,
+            );
+            let svg = to_svg(&b, Default::default()).unwrap().svg;
+            assert!(svg.contains(&format!("text-anchor=\"{anchor}\"")), "{svg}");
+            assert!(
+                svg.contains(&format!("dominant-baseline=\"{baseline}\"")),
+                "{svg}"
+            );
+        }
+    }
+}
+
+#[test]
+fn update_cp_uses_dx_and_text_escapement_in_logical_space() {
+    let mut font = vec![0u8; 50];
+    font[0..2].copy_from_slice(&12i16.to_le_bytes());
+    font[4..6].copy_from_slice(&900i16.to_le_bytes());
+    font[8..10].copy_from_slice(&400i16.to_le_bytes());
+    font[18..24].copy_from_slice(b"Arial\0");
+    let b = standard(
+        &[
+            rec(META_CREATEFONTINDIRECT, &font),
+            rec(META_SELECTOBJECT, &0u16.to_le_bytes()),
+            rec(META_SETTEXTALIGN, &1u16.to_le_bytes()),
+            rec(META_MOVETO, &i16s(&[20, 10])),
+            ext_text(b"AB", 0, None, [0, 0], &[3, 4]),
+            rec(META_LINETO, &i16s(&[20, 20])),
+            eof(),
+        ],
+        1,
+    );
+    let result = to_svg(&b, Default::default()).unwrap();
+    assert!(result.svg.contains("rotate(-90 10 20)"), "{}", result.svg);
+    assert!(result.svg.contains("M 10 13 L 20 20"), "{}", result.svg);
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "approximate_update_cp"));
+}
+
+#[test]
+fn update_cp_without_dx_is_deterministic_and_diagnostic() {
+    let b = standard(
+        &[
+            rec(META_SETTEXTALIGN, &1u16.to_le_bytes()),
+            rec(META_MOVETO, &i16s(&[0, 0])),
+            text_out(b"AB", [99, 99]),
+            rec(META_LINETO, &i16s(&[0, 30])),
+            eof(),
+        ],
+        0,
+    );
+    let result = to_svg(&b, Default::default()).unwrap();
+    assert!(result.svg.contains("M 14.4 0 L 30 0"), "{}", result.svg);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "approximate_update_cp"));
 }
 #[test]
 fn renders_intersection_clip() {
@@ -373,9 +527,48 @@ fn renders_stretchdib_as_embedded_png() {
     params.extend(i16s(&[1, 2, 0, 0, 10, 20, 5, 6]));
     params.extend(dib);
     let b = standard(&[rec(META_STRETCHDIB, &params), eof()], 0);
-    let svg = to_svg(&b, RenderOptions::default()).unwrap().svg;
-    assert!(svg.contains("href=\"data:image/png;base64,"));
-    assert!(svg.contains("x=\"6\" y=\"5\" width=\"20\" height=\"10\""));
+    let result = to_svg(&b, RenderOptions::default()).unwrap();
+    assert!(result.svg.contains("href=\"data:image/png;base64,"));
+    assert!(result
+        .svg
+        .contains("x=\"6\" y=\"5\" width=\"20\" height=\"10\""));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "unsupported_stretch_mode"));
+    assert!(matches!(
+        to_svg(
+            &b,
+            RenderOptions {
+                strict: true,
+                ..Default::default()
+            }
+        ),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
+    let mut mapped_params = params;
+    mapped_params[14..16].copy_from_slice(&1i16.to_le_bytes());
+    mapped_params[16..18].copy_from_slice(&2i16.to_le_bytes());
+    let mapped = standard(
+        &[
+            rec(META_SETMAPMODE, &8i16.to_le_bytes()),
+            rec(META_SETWINDOWEXT, &i16s(&[2, 2])),
+            rec(META_SETVIEWPORTEXT, &i16s(&[10, 10])),
+            rec(META_STRETCHDIB, &mapped_params),
+            eof(),
+        ],
+        0,
+    );
+    assert!(matches!(
+        to_svg(
+            &mapped,
+            RenderOptions {
+                strict: true,
+                ..Default::default()
+            }
+        ),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
 }
 
 #[test]
@@ -777,12 +970,71 @@ fn bitmap_crop_selects_only_requested_pixels() {
         height: 2,
         rgba: (0u8..24).collect(),
     };
-    let cropped = crop_bitmap(bitmap, 1, 0, 2, 2, 0).unwrap();
+    let cropped = crop_bitmap(bitmap, true, 1, 0, 2, 2, 0).unwrap();
     assert_eq!((cropped.width, cropped.height), (2, 2));
     assert_eq!(
         cropped.rgba,
         vec![4, 5, 6, 7, 8, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23]
     );
+}
+
+#[test]
+fn bitmap_crop_honors_bottom_up_origin_and_negative_extents() {
+    let bitmap = metafile_core::Bitmap {
+        width: 2,
+        height: 2,
+        rgba: vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255],
+    };
+    let bottom = crop_bitmap(bitmap.clone(), false, 0, 0, 2, 1, 0).unwrap();
+    assert_eq!(bottom.rgba, vec![3, 0, 0, 255, 4, 0, 0, 255]);
+    let mirrored = crop_bitmap(bitmap, true, 2, 2, -2, -2, 0).unwrap();
+    assert_eq!(
+        mirrored.rgba,
+        vec![4, 0, 0, 255, 3, 0, 0, 255, 2, 0, 0, 255, 1, 0, 0, 255]
+    );
+}
+
+#[test]
+fn stretch_and_mapper_state_only_warn_when_consumed() {
+    let state_only = standard(
+        &[
+            rec(META_SETSTRETCHBLTMODE, &4i16.to_le_bytes()),
+            rec(META_SETMAPPERFLAGS, &1u32.to_le_bytes()),
+            eof(),
+        ],
+        0,
+    );
+    let state_diagnostics = to_svg(&state_only, Default::default()).unwrap().diagnostics;
+    assert!(!state_diagnostics.iter().any(|d| {
+        matches!(
+            d.code.as_str(),
+            "unsupported_stretch_mode" | "approximate_stretch_mode" | "unsupported_mapper_flags"
+        )
+    }));
+
+    let mapped_text = standard(
+        &[
+            rec(META_SETMAPPERFLAGS, &1u32.to_le_bytes()),
+            text_out(b"A", [0, 0]),
+            eof(),
+        ],
+        0,
+    );
+    let permissive = to_svg(&mapped_text, Default::default()).unwrap();
+    assert!(permissive
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "unsupported_mapper_flags"));
+    assert!(matches!(
+        to_svg(
+            &mapped_text,
+            RenderOptions {
+                strict: true,
+                ..Default::default()
+            }
+        ),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
 }
 
 #[test]
@@ -831,7 +1083,7 @@ fn arc_sweep_and_fill_follow_kind_and_axis_orientation() {
         0,
     );
     let svg = to_svg(&normal, RenderOptions::default()).unwrap().svg;
-    assert!(svg.contains(" A 50 50 0 1 0"));
+    assert!(svg.contains(" A 50 50 0 0 0"));
     assert_eq!(svg.matches(" Z").count(), 2);
     let inverted = standard(
         &[
@@ -844,5 +1096,5 @@ fn arc_sweep_and_fill_follow_kind_and_axis_orientation() {
         0,
     );
     let inverted_svg = to_svg(&inverted, RenderOptions::default()).unwrap().svg;
-    assert!(inverted_svg.contains(" A 50 50 0 1 1"), "{inverted_svg}");
+    assert!(inverted_svg.contains(" A 50 50 0 0 0"), "{inverted_svg}");
 }

@@ -14,4 +14,10 @@ The golden-image command has a development-only direct dependency on `png` to
 decode candidate and reference images. It is not linked into parser or playback
 consumers.
 
+The `metafile` crate uses `serde_json` only as a development dependency for the
+fixture integration test and diagnostic-writing example. Node's standard
+library drives browser/corpus scripts. The Windows reference oracle is C#
+compiled on demand by PowerShell and uses Windows `System.Drawing`/GDI+; it is
+not a Cargo dependency or distributable runtime component.
+
 No dependency parses, interprets, plays, or renders WMF/EMF records.

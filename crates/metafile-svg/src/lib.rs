@@ -2,8 +2,9 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{
-    ArcKind, Bitmap, Brush, BrushStyle, Color, MetafileError, Pen, PenStyle, Point, Rect, Renderer,
-    ResourceLimits, Result, TextRun,
+    ArcKind, Bitmap, BitmapSampling, Brush, BrushStyle, Color, HorizontalTextAlignment,
+    MetafileError, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result, TextRun,
+    VerticalTextAlignment,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -323,16 +324,33 @@ impl Renderer for SvgRenderer {
         if kind == ArcKind::Pie {
             d = format!("M {} {} L {} {}", n(cx), n(cy), n(p0.x), n(p0.y));
         }
-        write!(
-            d,
-            " A {} {} 0 {large} {} {} {}",
-            n(rx),
-            n(ry),
-            i32::from(clockwise),
-            n(p1.x),
-            n(p1.y)
-        )
-        .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+        let sweep = i32::from(clockwise);
+        if (p0.x - p1.x).abs() < 0.000_001 && (p0.y - p1.y).abs() < 0.000_001 {
+            let opposite = Point::new(2.0 * cx - p0.x, 2.0 * cy - p0.y);
+            write!(
+                d,
+                " A {} {} 0 0 {sweep} {} {} A {} {} 0 0 {sweep} {} {}",
+                n(rx),
+                n(ry),
+                n(opposite.x),
+                n(opposite.y),
+                n(rx),
+                n(ry),
+                n(p1.x),
+                n(p1.y)
+            )
+            .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+        } else {
+            write!(
+                d,
+                " A {} {} 0 {large} {sweep} {} {}",
+                n(rx),
+                n(ry),
+                n(p1.x),
+                n(p1.y)
+            )
+            .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
+        }
         if matches!(kind, ArcKind::Pie | ArcKind::Chord) {
             d.push_str(" Z");
         }
@@ -368,14 +386,15 @@ impl Renderer for SvgRenderer {
         )
     }
     fn text(&mut self, run: &TextRun) -> Result<()> {
-        let anchor = match run.align & 0x0006 {
-            6 => "middle",
-            2 => "end",
-            _ => "start",
+        let anchor = match run.horizontal_align {
+            HorizontalTextAlignment::Left => "start",
+            HorizontalTextAlignment::Center => "middle",
+            HorizontalTextAlignment::Right => "end",
         };
-        let baseline = match run.align & 0x0018 {
-            8 => "text-before-edge",
-            _ => "alphabetic",
+        let baseline = match run.vertical_align {
+            VerticalTextAlignment::Top => "text-before-edge",
+            VerticalTextAlignment::Bottom => "text-after-edge",
+            VerticalTextAlignment::Baseline => "alphabetic",
         };
         let decoration = match (run.font.underline, run.font.strike_out) {
             (true, true) => "underline line-through",
@@ -395,6 +414,32 @@ impl Renderer for SvgRenderer {
         };
         let clip = self.clip_attr(run.clip);
         let size = run.font.height.abs().max(1.0);
+        let estimated_width = if run.dx.is_empty() {
+            size * run.text.chars().count() as f64 * 0.6
+        } else {
+            run.dx.iter().sum::<f64>().abs()
+        };
+        let (text_left, text_right) = match run.horizontal_align {
+            HorizontalTextAlignment::Left => (run.position.x, run.position.x + estimated_width),
+            HorizontalTextAlignment::Center => (
+                run.position.x - estimated_width / 2.0,
+                run.position.x + estimated_width / 2.0,
+            ),
+            HorizontalTextAlignment::Right => (run.position.x - estimated_width, run.position.x),
+        };
+        let (text_top, text_bottom) = match run.vertical_align {
+            VerticalTextAlignment::Top => (run.position.y, run.position.y + size),
+            VerticalTextAlignment::Bottom => (run.position.y - size, run.position.y),
+            VerticalTextAlignment::Baseline => {
+                (run.position.y - size * 0.8, run.position.y + size * 0.2)
+            }
+        };
+        let estimated_bounds = Rect {
+            left: text_left,
+            top: text_top,
+            right: text_right,
+            bottom: text_bottom,
+        };
         if let (Some(bg), Some(background_rect)) = (run.background, run.background_rect) {
             let background_rect = background_rect.normalized();
             self.push(
@@ -412,24 +457,25 @@ impl Renderer for SvgRenderer {
             self.push(
                 format!(
                     "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"{clip}/>",
-                    n(run.position.x),
-                    n(run.position.y - size),
-                    n(size * f64::from(run.text.chars().count() as u32) * 0.6),
-                    n(size),
+                    n(estimated_bounds.left),
+                    n(estimated_bounds.top),
+                    n(estimated_bounds.width()),
+                    n(estimated_bounds.height()),
                     bg.css()
                 ),
-                Rect {
-                    left: run.position.x,
-                    top: run.position.y - size,
-                    right: run.position.x + size * f64::from(run.text.chars().count() as u32) * 0.6,
-                    bottom: run.position.y,
-                },
+                estimated_bounds,
             )?;
         }
-        let content = if run.dx.is_empty() {
-            xml(&run.text)
+        let (content, text_x, effective_anchor) = if run.dx.is_empty() {
+            (xml(&run.text), run.position.x, anchor)
         } else {
-            let mut x = run.position.x;
+            let total: f64 = run.dx.iter().sum();
+            let start_x = match run.horizontal_align {
+                HorizontalTextAlignment::Left => run.position.x,
+                HorizontalTextAlignment::Center => run.position.x - total / 2.0,
+                HorizontalTextAlignment::Right => run.position.x - total,
+            };
+            let mut x = start_x;
             let mut spans = String::new();
             for (index, ch) in run.text.chars().enumerate() {
                 write!(
@@ -442,11 +488,17 @@ impl Renderer for SvgRenderer {
                 .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
                 x += run.dx.get(index).copied().unwrap_or(0.0);
             }
-            spans
+            (spans, start_x, "start")
         };
-        self.push(format!("<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{anchor}\" dominant-baseline=\"{baseline}\"{transform}{clip}>{content}</text>",n(run.position.x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"}),Rect{left:run.position.x,top:run.position.y-size,right:run.position.x+size*f64::from(run.text.chars().count() as u32)*0.6,bottom:run.position.y})
+        self.push(format!("<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{effective_anchor}\" dominant-baseline=\"{baseline}\"{transform}{clip}>{content}</text>",n(text_x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"}),estimated_bounds)
     }
-    fn bitmap(&mut self, dest: Rect, bitmap: &Bitmap, clip: Option<Rect>) -> Result<()> {
+    fn bitmap(
+        &mut self,
+        dest: Rect,
+        bitmap: &Bitmap,
+        sampling: BitmapSampling,
+        clip: Option<Rect>,
+    ) -> Result<()> {
         let mut bytes = Vec::new();
         {
             let mut enc = png::Encoder::new(&mut bytes, bitmap.width, bitmap.height);
@@ -460,8 +512,31 @@ impl Renderer for SvgRenderer {
                 .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
         }
         let r = dest.normalized();
+        let sx = if dest.right < dest.left { -1.0 } else { 1.0 };
+        let sy = if dest.bottom < dest.top { -1.0 } else { 1.0 };
+        let transform = if sx < 0.0 || sy < 0.0 {
+            format!(
+                " transform=\"translate({} {}) scale({} {})\"",
+                n(dest.left),
+                n(dest.top),
+                n(sx),
+                n(sy)
+            )
+        } else {
+            String::new()
+        };
+        let (x, y) = if transform.is_empty() {
+            (r.left, r.top)
+        } else {
+            (0.0, 0.0)
+        };
+        let image_rendering = match sampling {
+            BitmapSampling::Auto => "",
+            BitmapSampling::Pixelated => " image-rendering=\"pixelated\"",
+            BitmapSampling::Smooth => " image-rendering=\"smooth\"",
+        };
         let clip = self.clip_attr(clip);
-        self.push(format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{}\"{clip}/>",n(r.left),n(r.top),n(r.width()),n(r.height()),STANDARD.encode(bytes)),r)
+        self.push(format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{}\"{image_rendering}{transform}{clip}/>",n(x),n(y),n(r.width()),n(r.height()),STANDARD.encode(bytes)),r)
     }
 }
 
@@ -560,7 +635,8 @@ mod tests {
             color: Color::BLACK,
             background: None,
             background_rect: None,
-            align: 0,
+            horizontal_align: HorizontalTextAlignment::Left,
+            vertical_align: VerticalTextAlignment::Top,
             clip: None,
             dx: vec![],
         })
@@ -568,5 +644,58 @@ mod tests {
         let s = r.finish(None, None).unwrap();
         assert!(s.contains("a&lt;&amp;&quot;"));
         assert!(!s.contains("viewBox=\"2 0.0"));
+    }
+
+    #[test]
+    fn full_ellipse_arc_uses_two_segments() {
+        let mut renderer = SvgRenderer::new(ResourceLimits::default());
+        renderer
+            .arc(
+                Rect {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 100.0,
+                    bottom: 50.0,
+                },
+                Point::new(100.0, 25.0),
+                Point::new(100.0, 25.0),
+                ArcKind::Arc,
+                false,
+                &Pen::default(),
+                &Brush::default(),
+                None,
+            )
+            .unwrap();
+        let svg = renderer.finish(None, None).unwrap();
+        assert_eq!(svg.matches(" A 50 25").count(), 2, "{svg}");
+    }
+
+    #[test]
+    fn bitmap_preserves_negative_destination_extent() {
+        let mut renderer = SvgRenderer::new(ResourceLimits::default());
+        renderer
+            .bitmap(
+                Rect {
+                    left: 10.0,
+                    top: 20.0,
+                    right: 0.0,
+                    bottom: 10.0,
+                },
+                &Bitmap {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![255, 0, 0, 255],
+                },
+                BitmapSampling::Pixelated,
+                None,
+            )
+            .unwrap();
+        let svg = renderer.finish(None, None).unwrap();
+        assert!(
+            svg.contains(
+                "image-rendering=\"pixelated\" transform=\"translate(10 20) scale(-1 -1)\""
+            ),
+            "{svg}"
+        );
     }
 }

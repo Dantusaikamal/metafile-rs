@@ -1,7 +1,12 @@
 use crate::reader::Reader;
 use metafile_core::{Bitmap, MetafileError, ResourceLimits, Result};
 
-pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> Result<Bitmap> {
+pub struct DecodedDib {
+    pub bitmap: Bitmap,
+    pub top_down: bool,
+}
+
+pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> Result<DecodedDib> {
     let bad = |m: &str| MetafileError::InvalidBitmap {
         record_index,
         message: m.into(),
@@ -139,10 +144,13 @@ pub fn decode_dib(data: &[u8], record_index: usize, limits: &ResourceLimits) -> 
             rgba[o..o + 4].copy_from_slice(&[red, green, blue, 255]);
         }
     }
-    Ok(Bitmap {
-        width: w,
-        height: h,
-        rgba,
+    Ok(DecodedDib {
+        bitmap: Bitmap {
+            width: w,
+            height: h,
+            rgba,
+        },
+        top_down: signed_height < 0,
     })
 }
 fn pal(p: &[u8], i: usize, record_index: usize) -> Result<(u8, u8, u8)> {
@@ -174,7 +182,8 @@ mod tests {
         d[14..16].copy_from_slice(&24u16.to_le_bytes());
         d[40..46].copy_from_slice(&[0, 0, 255, 0, 255, 0]);
         let b = decode_dib(&d, 0, &ResourceLimits::default()).unwrap();
-        assert_eq!(&b.rgba[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(&b.bitmap.rgba[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+        assert!(!b.top_down);
     }
     #[test]
     fn rejects_truncated() {
@@ -216,5 +225,18 @@ mod tests {
             decode_dib(&palette, 1, &ResourceLimits::default()),
             Err(MetafileError::InvalidBitmap { .. })
         ));
+    }
+
+    #[test]
+    fn bi_rgb_32bit_reserved_alpha_is_opaque() {
+        let mut dib = vec![0u8; 44];
+        dib[0..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&1i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&1i32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+        dib[40..44].copy_from_slice(&[3, 2, 1, 0]);
+        let decoded = decode_dib(&dib, 0, &ResourceLimits::default()).unwrap();
+        assert_eq!(decoded.bitmap.rgba, vec![1, 2, 3, 255]);
     }
 }
