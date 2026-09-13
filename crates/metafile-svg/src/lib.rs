@@ -2,9 +2,9 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{
-    ArcKind, Bitmap, BitmapSampling, Brush, BrushStyle, Color, HorizontalTextAlignment,
-    MetafileError, Path, PathSegment, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result,
-    TextRun, VerticalTextAlignment,
+    ArcKind, Bitmap, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipRegion, Color,
+    HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Path, PathSegment, Pen, PenStyle,
+    Point, Rect, Renderer, ResourceLimits, Result, TextRun, VerticalTextAlignment,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -130,20 +130,53 @@ impl SvgRenderer {
         Ok(())
     }
 
-    fn clip_attr(&mut self, clip: Option<Rect>) -> String {
-        let Some(r) = clip else {
+    fn clip_attr(&mut self, clip: Option<&ClipRegion>) -> String {
+        let Some(region) = clip else {
             return String::new();
         };
-        let r = r.normalized();
-        let key = format!("{}:{}:{}:{}", n(r.left), n(r.top), n(r.right), n(r.bottom));
+        let id = self.ensure_clip_id(region);
+        format!(" clip-path=\"url(#clip{id})\"")
+    }
+
+    fn ensure_clip_id(&mut self, region: &ClipRegion) -> u32 {
+        if let ClipRegion::Intersection(regions) = region {
+            let mut flattened = Vec::new();
+            flatten_clip_regions(regions, &mut flattened);
+            if flattened.is_empty() {
+                return self.ensure_clip_id(&ClipRegion::Polygon(Vec::new()));
+            }
+            let mut id = self.ensure_clip_id(flattened[0]);
+            let mut compound_key = clip_key(flattened[0]);
+            for part in &flattened[1..] {
+                compound_key.push('&');
+                compound_key.push_str(&clip_key(part));
+                if let Some(existing) = self.clip_ids.get(&compound_key) {
+                    id = *existing;
+                    continue;
+                }
+                let next_id = self.next_clip_id;
+                self.next_clip_id += 1;
+                self.clip_ids.insert(compound_key.clone(), next_id);
+                self.definitions.push(format!(
+                    "<clipPath id=\"clip{next_id}\"><g clip-path=\"url(#clip{id})\">{}</g></clipPath>",
+                    clip_element(part)
+                ));
+                id = next_id;
+            }
+            return id;
+        }
+        let key = clip_key(region);
         if let Some(id) = self.clip_ids.get(&key) {
-            return format!(" clip-path=\"url(#clip{id})\"");
+            return *id;
         }
         let id = self.next_clip_id;
         self.next_clip_id += 1;
         self.clip_ids.insert(key, id);
-        self.definitions.push(format!("<clipPath id=\"clip{id}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>", n(r.left), n(r.top), n(r.width()), n(r.height())));
-        format!(" clip-path=\"url(#clip{id})\"")
+        self.definitions.push(format!(
+            "<clipPath id=\"clip{id}\">{}</clipPath>",
+            clip_element(region)
+        ));
+        id
     }
 }
 
@@ -151,7 +184,7 @@ impl Renderer for SvgRenderer {
     fn drawing_bounds(&self) -> Option<Rect> {
         self.bounds
     }
-    fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<Rect>) -> Result<()> {
+    fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<&ClipRegion>) -> Result<()> {
         let clip = self.clip_attr(clip);
         let style = paint(
             pen,
@@ -172,7 +205,7 @@ impl Renderer for SvgRenderer {
             stroke_bounds(points_bounds(&[from, to]), pen),
         )
     }
-    fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<Rect>) -> Result<()> {
+    fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<&ClipRegion>) -> Result<()> {
         if points.is_empty() {
             return Ok(());
         }
@@ -199,7 +232,7 @@ impl Renderer for SvgRenderer {
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         if points.is_empty() {
             return Ok(());
@@ -220,7 +253,7 @@ impl Renderer for SvgRenderer {
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         let points: Vec<Point> = polygons.iter().flatten().copied().collect();
         if points.is_empty() {
@@ -256,7 +289,7 @@ impl Renderer for SvgRenderer {
         fill_mode: u16,
         stroke: bool,
         fill: bool,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         let mut data = String::new();
         let mut points = Vec::new();
@@ -330,7 +363,7 @@ impl Renderer for SvgRenderer {
         radius: Option<Point>,
         pen: &Pen,
         brush: &Brush,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         let r = rect.normalized();
         let clip = self.clip_attr(clip);
@@ -353,7 +386,13 @@ impl Renderer for SvgRenderer {
             stroke_bounds(r, pen),
         )
     }
-    fn ellipse(&mut self, rect: Rect, pen: &Pen, brush: &Brush, clip: Option<Rect>) -> Result<()> {
+    fn ellipse(
+        &mut self,
+        rect: Rect,
+        pen: &Pen,
+        brush: &Brush,
+        clip: Option<&ClipRegion>,
+    ) -> Result<()> {
         let r = rect.normalized();
         let clip = self.clip_attr(clip);
         self.push(
@@ -377,7 +416,7 @@ impl Renderer for SvgRenderer {
         clockwise: bool,
         pen: &Pen,
         brush: &Brush,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         let r = rect.normalized();
         let cx = r.left.midpoint(r.right);
@@ -443,7 +482,7 @@ impl Renderer for SvgRenderer {
             stroke_bounds(r, pen),
         )
     }
-    fn pixel(&mut self, point: Point, color: Color, clip: Option<Rect>) -> Result<()> {
+    fn pixel(&mut self, point: Point, color: Color, clip: Option<&ClipRegion>) -> Result<()> {
         let c = self.clip_attr(clip);
         self.push(
             format!(
@@ -487,7 +526,7 @@ impl Renderer for SvgRenderer {
         } else {
             String::new()
         };
-        let clip = self.clip_attr(run.clip);
+        let clip = self.clip_attr(run.clip.as_ref());
         let size = run.font.height.abs().max(1.0);
         let estimated_width = if run.dx.is_empty() {
             size * run.text.chars().count() as f64 * 0.6
@@ -515,7 +554,17 @@ impl Renderer for SvgRenderer {
             right: text_right,
             bottom: text_bottom,
         };
-        if let (Some(bg), Some(background_rect)) = (run.background, run.background_rect) {
+        if let (Some(bg), Some(background_path)) = (run.background, run.background_path.as_ref()) {
+            let data = path_data(background_path)?;
+            let bounds = path_bounds(background_path)?;
+            self.push(
+                format!(
+                    "<path d=\"{data}\" fill=\"{}\" stroke=\"none\"{clip}/>",
+                    bg.css()
+                ),
+                bounds,
+            )?;
+        } else if let (Some(bg), Some(background_rect)) = (run.background, run.background_rect) {
             let background_rect = background_rect.normalized();
             self.push(
                 format!(
@@ -569,10 +618,10 @@ impl Renderer for SvgRenderer {
     }
     fn bitmap(
         &mut self,
-        dest: Rect,
+        placement: BitmapPlacement,
         bitmap: &Bitmap,
         sampling: BitmapSampling,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()> {
         let mut bytes = Vec::new();
         {
@@ -586,32 +635,29 @@ impl Renderer for SvgRenderer {
                 .write_image_data(&bitmap.rgba)
                 .map_err(|e| MetafileError::SvgGeneration(e.to_string()))?;
         }
-        let r = dest.normalized();
-        let sx = if dest.right < dest.left { -1.0 } else { 1.0 };
-        let sy = if dest.bottom < dest.top { -1.0 } else { 1.0 };
-        let transform = if sx < 0.0 || sy < 0.0 {
-            format!(
-                " transform=\"translate({} {}) scale({} {})\"",
-                n(dest.left),
-                n(dest.top),
-                n(sx),
-                n(sy)
-            )
-        } else {
-            String::new()
-        };
-        let (x, y) = if transform.is_empty() {
-            (r.left, r.top)
-        } else {
-            (0.0, 0.0)
-        };
+        let transform = format!(
+            "matrix({} {} {} {} {} {})",
+            n(placement.x_axis.x),
+            n(placement.x_axis.y),
+            n(placement.y_axis.x),
+            n(placement.y_axis.y),
+            n(placement.origin.x),
+            n(placement.origin.y)
+        );
         let image_rendering = match sampling {
             BitmapSampling::Auto => "",
             BitmapSampling::Pixelated => " image-rendering=\"pixelated\"",
             BitmapSampling::Smooth => " image-rendering=\"smooth\"",
         };
         let clip = self.clip_attr(clip);
-        self.push(format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{}\"{image_rendering}{transform}{clip}/>",n(x),n(y),n(r.width()),n(r.height()),STANDARD.encode(bytes)),r)
+        let corners = placement.corners();
+        self.push(
+            format!(
+                "<image x=\"0\" y=\"0\" width=\"1\" height=\"1\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{}\"{image_rendering} transform=\"{transform}\"{clip}/>",
+                STANDARD.encode(bytes)
+            ),
+            points_bounds(&corners),
+        )
     }
 }
 
@@ -645,7 +691,176 @@ fn paint(pen: &Pen, brush: &Brush, fill_mode: u16) -> String {
         _ => "none".into(),
     };
     let rule = if fill_mode == 2 { "nonzero" } else { "evenodd" };
-    format!("stroke=\"{stroke}\" stroke-width=\"{}\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\"{dash} fill=\"{fill}\" fill-rule=\"{rule}\"",n(width))
+    let line_cap = match pen.line_cap {
+        LineCap::Butt => "butt",
+        LineCap::Round => "round",
+        LineCap::Square => "square",
+    };
+    let line_join = match pen.line_join {
+        LineJoin::Miter => "miter",
+        LineJoin::Round => "round",
+        LineJoin::Bevel => "bevel",
+    };
+    format!("stroke=\"{stroke}\" stroke-width=\"{}\" stroke-linecap=\"{line_cap}\" stroke-linejoin=\"{line_join}\"{dash} fill=\"{fill}\" fill-rule=\"{rule}\"",n(width))
+}
+
+fn path_data(path: &Path) -> Result<String> {
+    let mut data = String::new();
+    for figure in &path.figures {
+        write!(data, "M {} {}", n(figure.start.x), n(figure.start.y))
+            .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+        for segment in &figure.segments {
+            match *segment {
+                PathSegment::Line(to) => {
+                    write!(data, " L {} {}", n(to.x), n(to.y))
+                        .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+                }
+                PathSegment::Cubic {
+                    control1,
+                    control2,
+                    to,
+                } => {
+                    write!(
+                        data,
+                        " C {} {} {} {} {} {}",
+                        n(control1.x),
+                        n(control1.y),
+                        n(control2.x),
+                        n(control2.y),
+                        n(to.x),
+                        n(to.y)
+                    )
+                    .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+                }
+            }
+        }
+        if figure.closed {
+            data.push_str(" Z");
+        }
+    }
+    Ok(data)
+}
+
+fn flatten_clip_regions<'a>(regions: &'a [ClipRegion], output: &mut Vec<&'a ClipRegion>) {
+    let mut pending: Vec<_> = regions.iter().rev().collect();
+    while let Some(region) = pending.pop() {
+        if let ClipRegion::Intersection(nested) = region {
+            pending.extend(nested.iter().rev());
+        } else {
+            output.push(region);
+        }
+    }
+}
+
+fn clip_key(region: &ClipRegion) -> String {
+    match region {
+        ClipRegion::Rect(rect) => {
+            let r = rect.normalized();
+            format!(
+                "r:{}:{}:{}:{}",
+                n(r.left),
+                n(r.top),
+                n(r.right),
+                n(r.bottom)
+            )
+        }
+        ClipRegion::Polygon(points) => format!("p:{}", point_list(points)),
+        ClipRegion::Path { path, fill_mode } => {
+            format!("d:{fill_mode}:{}", path_data_for_clip(path))
+        }
+        ClipRegion::Intersection(regions) => {
+            let mut flattened = Vec::new();
+            flatten_clip_regions(regions, &mut flattened);
+            flattened
+                .into_iter()
+                .map(clip_key)
+                .collect::<Vec<_>>()
+                .join("&")
+        }
+    }
+}
+
+fn clip_element(region: &ClipRegion) -> String {
+    match region {
+        ClipRegion::Rect(rect) => {
+            let r = rect.normalized();
+            format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+                n(r.left),
+                n(r.top),
+                n(r.width()),
+                n(r.height())
+            )
+        }
+        ClipRegion::Polygon(points) => {
+            format!("<polygon points=\"{}\"/>", point_list(points))
+        }
+        ClipRegion::Path { path, fill_mode } => format!(
+            "<path d=\"{}\" clip-rule=\"{}\"/>",
+            path_data_for_clip(path),
+            if *fill_mode == 2 {
+                "nonzero"
+            } else {
+                "evenodd"
+            }
+        ),
+        ClipRegion::Intersection(_) => String::new(),
+    }
+}
+
+fn path_data_for_clip(path: &Path) -> String {
+    let mut data = String::new();
+    for figure in &path.figures {
+        let _ = write!(data, "M {} {}", n(figure.start.x), n(figure.start.y));
+        for segment in &figure.segments {
+            match *segment {
+                PathSegment::Line(to) => {
+                    let _ = write!(data, " L {} {}", n(to.x), n(to.y));
+                }
+                PathSegment::Cubic {
+                    control1,
+                    control2,
+                    to,
+                } => {
+                    let _ = write!(
+                        data,
+                        " C {} {} {} {} {} {}",
+                        n(control1.x),
+                        n(control1.y),
+                        n(control2.x),
+                        n(control2.y),
+                        n(to.x),
+                        n(to.y)
+                    );
+                }
+            }
+        }
+        if figure.closed {
+            data.push_str(" Z");
+        }
+    }
+    data
+}
+
+fn path_bounds(path: &Path) -> Result<Rect> {
+    let mut points = Vec::new();
+    for figure in &path.figures {
+        points.push(figure.start);
+        for segment in &figure.segments {
+            match *segment {
+                PathSegment::Line(point) => points.push(point),
+                PathSegment::Cubic {
+                    control1,
+                    control2,
+                    to,
+                } => points.extend([control1, control2, to]),
+            }
+        }
+    }
+    points
+        .first()
+        .map(|_| points_bounds(&points))
+        .ok_or_else(|| MetafileError::SvgGeneration("empty path has no bounds".into()))
 }
 fn point_list(p: &[Point]) -> String {
     p.iter()
@@ -710,6 +925,7 @@ mod tests {
             color: Color::BLACK,
             background: None,
             background_rect: None,
+            background_path: None,
             horizontal_align: HorizontalTextAlignment::Left,
             vertical_align: VerticalTextAlignment::Top,
             clip: None,
@@ -750,12 +966,12 @@ mod tests {
         let mut renderer = SvgRenderer::new(ResourceLimits::default());
         renderer
             .bitmap(
-                Rect {
+                BitmapPlacement::from_rect(Rect {
                     left: 10.0,
                     top: 20.0,
                     right: 0.0,
                     bottom: 10.0,
-                },
+                }),
                 &Bitmap {
                     width: 1,
                     height: 1,
@@ -767,9 +983,7 @@ mod tests {
             .unwrap();
         let svg = renderer.finish(None, None).unwrap();
         assert!(
-            svg.contains(
-                "image-rendering=\"pixelated\" transform=\"translate(10 20) scale(-1 -1)\""
-            ),
+            svg.contains("image-rendering=\"pixelated\" transform=\"matrix(-10 0 0 -10 10 20)\""),
             "{svg}"
         );
     }

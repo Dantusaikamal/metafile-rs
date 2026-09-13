@@ -15,6 +15,9 @@ public static class MetafileReference
         public uint compression, sizeImage; public int xPelsPerMeter, yPelsPerMeter;
         public uint colorsUsed, colorsImportant;
     }
+    [StructLayout(LayoutKind.Sequential)] internal struct XFORM {
+        public float eM11, eM12, eM21, eM22, eDx, eDy;
+    }
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateMetaFile(string fileName);
     [DllImport("gdi32.dll")] static extern IntPtr CloseMetaFile(IntPtr hdc);
@@ -38,6 +41,9 @@ public static class MetafileReference
     [DllImport("gdi32.dll")] static extern bool TextOut(IntPtr hdc, int x, int y, string text, int length);
     [DllImport("gdi32.dll")] static extern uint SetTextAlign(IntPtr hdc, uint align);
     [DllImport("gdi32.dll")] static extern int SetStretchBltMode(IntPtr hdc, int mode);
+    [DllImport("gdi32.dll")] static extern int SetGraphicsMode(IntPtr hdc, int mode);
+    [DllImport("gdi32.dll")] static extern bool SetWorldTransform(IntPtr hdc, ref XFORM transform);
+    [DllImport("gdi32.dll")] static extern bool ModifyWorldTransform(IntPtr hdc, ref XFORM transform, uint mode);
     [DllImport("gdi32.dll")] static extern int StretchDIBits(IntPtr hdc, int xDest, int yDest, int destWidth, int destHeight, int xSrc, int ySrc, int srcWidth, int srcHeight, byte[] bits, ref BITMAPINFOHEADER info, uint usage, uint rop);
     [DllImport("gdi32.dll")] static extern IntPtr CreatePen(int style, int width, uint color);
     [DllImport("gdi32.dll")] static extern IntPtr CreateSolidBrush(uint color);
@@ -64,7 +70,14 @@ public static class MetafileReference
         GenerateEnhancedPaths(Path.Combine(directory, "windows-emf-paths.emf"));
         GenerateEnhancedBitmap(Path.Combine(directory, "windows-emf-bitmap.emf"));
         GenerateEnhancedState(Path.Combine(directory, "windows-emf-state.emf"));
+        GenerateEnhancedAffine(Path.Combine(directory, "windows-emf-affine.emf"));
         GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus.emf"), EmfType.EmfPlusDual);
+    }
+
+    public static void GenerateAffine(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        GenerateEnhancedAffine(Path.Combine(directory, "windows-emf-affine.emf"));
     }
 
     static void WithWmf(string path, Action<IntPtr> draw)
@@ -254,6 +267,81 @@ public static class MetafileReference
                 graphics.Restore(saved);
                 graphics.DrawRectangle(blue, 40, 260, 500, 90);
             }
+        });
+    }
+
+    static void GenerateEnhancedAffine(string path)
+    {
+        WithEnhanced(path, graphics =>
+        {
+                graphics.SmoothingMode = SmoothingMode.None;
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                using (var pen = new System.Drawing.Pen(Color.DarkBlue, 4))
+                using (var brush = new SolidBrush(Color.Goldenrod))
+                using (var shear = new Matrix(1.0f, 0.20f, 0.35f, 1.0f, 320.0f, 35.0f))
+                {
+                    graphics.TranslateTransform(145, 45);
+                    graphics.RotateTransform(30);
+                    graphics.FillRectangle(brush, 0, 0, 120, 70);
+                    graphics.DrawRectangle(pen, 0, 0, 120, 70);
+                    graphics.DrawEllipse(pen, 10, 85, 130, 70);
+
+                    graphics.Transform = shear;
+                    GraphicsState clipped = graphics.Save();
+                    graphics.SetClip(new System.Drawing.Rectangle(0, 0, 180, 125));
+                    graphics.DrawEllipse(pen, -20, -20, 230, 170);
+                    graphics.Restore(clipped);
+
+                    graphics.ResetTransform();
+                    graphics.TranslateTransform(45, 315, MatrixOrder.Append);
+                    graphics.ScaleTransform(1.4f, 0.7f, MatrixOrder.Prepend);
+                    graphics.DrawLine(pen, 0, 0, 100, 0);
+                    graphics.ResetTransform();
+                    graphics.TranslateTransform(300, 315, MatrixOrder.Append);
+                    graphics.ScaleTransform(1.4f, 0.7f, MatrixOrder.Append);
+                    graphics.DrawLine(pen, 0, 0, 100, 0);
+
+                    BITMAPINFOHEADER info = new BITMAPINFOHEADER {
+                        size = 40, width = 3, height = 2, planes = 1, bitCount = 24,
+                        compression = 0, sizeImage = 24
+                    };
+                    byte[] pixels = {
+                        255,255,0, 255,0,255, 0,255,255, 0,0,0,
+                        0,0,255, 0,255,0, 255,0,0, 0,0,0
+                    };
+                    IntPtr hdc = graphics.GetHdc();
+                    try {
+                        SetGraphicsMode(hdc, 2);
+                        IntPtr transformPen = CreatePen(0, 4, Rgb(0, 0, 139));
+                        IntPtr oldPen = SelectObject(hdc, transformPen);
+                        XFORM translation = new XFORM {
+                            eM11 = 1.0f, eM22 = 1.0f, eDx = 45.0f, eDy = 315.0f
+                        };
+                        XFORM scale = new XFORM {
+                            eM11 = 1.4f, eM22 = 0.7f
+                        };
+                        if (!SetWorldTransform(hdc, ref translation)
+                            || !ModifyWorldTransform(hdc, ref scale, 2))
+                            throw new InvalidOperationException("MWT_LEFTMULTIPLY failed");
+                        MoveToEx(hdc, 0, 0, IntPtr.Zero); LineTo(hdc, 100, 0);
+                        translation.eDx = 220.0f;
+                        if (!SetWorldTransform(hdc, ref translation)
+                            || !ModifyWorldTransform(hdc, ref scale, 3))
+                            throw new InvalidOperationException("MWT_RIGHTMULTIPLY failed");
+                        MoveToEx(hdc, 0, 0, IntPtr.Zero); LineTo(hdc, 100, 0);
+                        SelectObject(hdc, oldPen); DeleteObject(transformPen);
+
+                        XFORM bitmapTransform = new XFORM {
+                            eM11 = 0.85f, eM12 = 0.35f, eM21 = -0.20f,
+                            eM22 = 0.90f, eDx = 355.0f, eDy = 215.0f
+                        };
+                        if (!SetWorldTransform(hdc, ref bitmapTransform))
+                            throw new InvalidOperationException("SetWorldTransform failed");
+                        SetStretchBltMode(hdc, 3);
+                        StretchDIBits(hdc, 0, 0, 150, 90, 0, 0, 3, 2, pixels, ref info, 0, 0x00CC0020);
+                    }
+                    finally { graphics.ReleaseHdc(hdc); }
+                }
         });
     }
 

@@ -5,7 +5,7 @@ Metafiles and rendering deterministic, self-contained SVG. It targets native
 Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
 converters, browser Canvas, or remote services.
 
-This release establishes substantial WMF support and an initial ordinary-EMF
+This release establishes substantial WMF support and a hardened ordinary-EMF
 engine. It is not a claim of complete Windows GDI compatibility. EMF+ is
 detected but its playback remains a roadmap feature.
 
@@ -42,7 +42,7 @@ level consumers can call `metafile_wmf::playback` with any
 | Other bitmap transfers/compression | Diagnostic-only | Safely skipped in permissive mode and rejected in strict mode. |
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
-| Ordinary EMF | Partial | Validated headers, world/mapping transforms, objects/DC state, common vectors and paths, Unicode text, rectangular clips, and BI_RGB StretchDIBits are rendered. See `docs/emf-record-audit.md`. |
+| Ordinary EMF | Partial | Validated headers, world/mapping transforms, common vectors/paths, transformed polygon/path clips, Unicode/ANSI text, and affine BI_RGB StretchDIBits are rendered. Arbitrary-affine text and non-uniform geometric pens remain explicit approximations. See `docs/emf-record-audit.md`. |
 | EMF+ | Classified, playback unsupported | Embedded EMF+ comments produce `MetafileFormat::EmfPlus`; playback fails explicitly instead of ignoring the stream. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
@@ -82,7 +82,8 @@ input returns typed errors and the workspace forbids unsafe Rust.
 
 `metafile-wasm` exposes format-neutral `inspectMetafile(Uint8Array)` and
 `metafileToSvg(Uint8Array, options?)`; `inspectWmf` and `wmfToSvg` remain
-compatibility aliases. The generated wasm-bindgen loader is
+WMF-specific compatibility APIs and reject EMF with a structured
+`format_mismatch` error. The generated wasm-bindgen loader is
 responsible for initialization; the engine itself performs no fetch, filesystem,
 DOM, Canvas, or Node operations. No npm package is included yet.
 

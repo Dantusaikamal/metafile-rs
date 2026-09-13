@@ -3,6 +3,8 @@
 debug
 target
 artifacts/
+tools/windows-reference/bin/
+tools/windows-reference/obj/
 fixtures/private/*
 !fixtures/private/README.md
 fuzz/artifacts/

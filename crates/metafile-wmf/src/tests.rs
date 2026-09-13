@@ -99,7 +99,7 @@ fn text_out(text: &[u8], position: [i16; 2]) -> Vec<u8> {
     let mut params = Vec::new();
     params.extend((text.len() as u16).to_le_bytes());
     params.extend(text);
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         params.push(0);
     }
     params.extend(i16s(&position));
@@ -498,6 +498,23 @@ fn placeable_sets_physical_size() {
 }
 
 #[test]
+fn placeable_window_extent_uses_header_as_implicit_viewport() {
+    let bytes = placeable(
+        &[
+            rec(META_SETMAPMODE, &8i16.to_le_bytes()),
+            rec(META_SETWINDOWEXT, &i16s(&[100, 200])),
+            rec(META_MOVETO, &i16s(&[0, 0])),
+            rec(META_LINETO, &i16s(&[100, 200])),
+            eof(),
+        ],
+        0,
+    );
+    let rendered = to_svg(&bytes, Default::default()).unwrap().svg;
+    assert!(rendered.contains("viewBox=\"0 0 100 100\""), "{rendered}");
+    assert!(rendered.contains("M 0 0 L 100 100"), "{rendered}");
+}
+
+#[test]
 fn selects_stock_black_pen() {
     let b = standard(
         &[
@@ -529,9 +546,7 @@ fn renders_stretchdib_as_embedded_png() {
     let b = standard(&[rec(META_STRETCHDIB, &params), eof()], 0);
     let result = to_svg(&b, RenderOptions::default()).unwrap();
     assert!(result.svg.contains("href=\"data:image/png;base64,"));
-    assert!(result
-        .svg
-        .contains("x=\"6\" y=\"5\" width=\"20\" height=\"10\""));
+    assert!(result.svg.contains("transform=\"matrix(20 0 0 10 6 5)\""));
     assert!(result
         .diagnostics
         .iter()
@@ -878,7 +893,7 @@ fn fixed_map_modes_have_specification_units_and_y_orientation() {
         (6, 96.0 / 1440.0, -96.0 / 1440.0),
     ];
     for (mode, sx, sy) in cases {
-        let mut player = Player::new(0, ResourceLimits::default());
+        let mut player = Player::new(0, ResourceLimits::default(), None);
         let e = RecordEntry {
             index: 0,
             offset: 0,

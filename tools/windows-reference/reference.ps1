@@ -1,22 +1,17 @@
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('generate', 'render')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('generate', 'generate-affine', 'render')][string]$Action,
     [Parameter(Mandatory = $true)][string]$Path,
     [string]$Output,
     [int]$Width = 600,
     [int]$Height = 400
 )
 
-$source = Join-Path $PSScriptRoot 'MetafileReference.cs'
-Add-Type -Path $source -ReferencedAssemblies System.Drawing
-
-if ($Action -eq 'generate') {
-    [MetafileReference]::Generate((Resolve-Path -LiteralPath $Path).Path)
+if ($Action -in @('generate', 'generate-affine')) {
+    $arguments = @('run', '--project', (Join-Path $PSScriptRoot 'MetafileReference.csproj'), '--configuration', 'Release', '--no-launch-profile', '--', $Action, ([IO.Path]::GetFullPath($Path)))
 } else {
     if (-not $Output) { throw 'render requires -Output' }
-    [MetafileReference]::Render(
-        (Resolve-Path -LiteralPath $Path).Path,
-        [IO.Path]::GetFullPath($Output),
-        $Width,
-        $Height
-    )
+    $arguments = @('run', '--project', (Join-Path $PSScriptRoot 'MetafileReference.csproj'), '--configuration', 'Release', '--no-launch-profile', '--', 'render', (Resolve-Path -LiteralPath $Path).Path, [IO.Path]::GetFullPath($Output), $Width, $Height)
 }
+
+& dotnet @arguments
+if ($LASTEXITCODE -ne 0) { throw "Windows reference tool failed with exit code $LASTEXITCODE" }

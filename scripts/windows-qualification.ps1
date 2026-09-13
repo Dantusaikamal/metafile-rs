@@ -10,15 +10,15 @@ $cases = @(
     @{ Name = 'windows-gdi-arcs'; Profile = 'vector' },
     @{ Name = 'windows-gdi-polypolygon'; Profile = 'vector' },
     @{ Name = 'windows-gdi-text'; Profile = 'text' },
-    @{ Name = 'windows-gdi-bitmap'; Extension = 'wmf'; Profile = $null },
-    # Windows DrawImage maps the full EMF frame while SVG intentionally uses rclBounds;
-    # collect metrics and images, but do not apply framing-sensitive WMF thresholds.
-    @{ Name = 'windows-gdiplus-emf'; Extension = 'emf'; Profile = $null },
-    @{ Name = 'windows-emf-mapping'; Extension = 'emf'; Profile = $null },
-    @{ Name = 'windows-emf-text'; Extension = 'emf'; Profile = $null },
-    @{ Name = 'windows-emf-paths'; Extension = 'emf'; Profile = $null },
-    @{ Name = 'windows-emf-bitmap'; Extension = 'emf'; Profile = $null },
-    @{ Name = 'windows-emf-state'; Extension = 'emf'; Profile = $null }
+    @{ Name = 'windows-gdi-bitmap'; Extension = 'wmf'; Profile = 'bitmap' },
+    @{ Name = 'windows-gdiplus-emf'; Extension = 'emf'; Profile = 'text' },
+    @{ Name = 'windows-emf-mapping'; Extension = 'emf'; Profile = 'vector' },
+    @{ Name = 'windows-emf-text'; Extension = 'emf'; Profile = 'text' },
+    @{ Name = 'windows-emf-paths'; Extension = 'emf'; Profile = 'vector' },
+    @{ Name = 'windows-emf-bitmap'; Extension = 'emf'; Profile = 'bitmap' },
+    @{ Name = 'windows-emf-state'; Extension = 'emf'; Profile = 'vector' },
+    # This mixed geometry/clip/bitmap case uses the bitmap tolerance profile.
+    @{ Name = 'windows-emf-affine'; Extension = 'emf'; Profile = 'bitmap' }
 )
 
 foreach ($case in $cases) {

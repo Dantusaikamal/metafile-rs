@@ -6,9 +6,9 @@ mod record;
 use encoding_rs::{Encoding, WINDOWS_1252};
 pub use metafile_core::RenderOptions;
 use metafile_core::{
-    ArcKind, BitmapSampling, Brush, BrushStyle, Color, DeviceContext, Diagnostic, Font, GdiObject,
-    HorizontalTextAlignment, MetafileError, MetafileFormat, Pen, PenStyle, Point, Rect, Renderer,
-    ResourceLimits, Result, VerticalTextAlignment,
+    ArcKind, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipRegion, Color, DeviceContext,
+    Diagnostic, Font, GdiObject, HorizontalTextAlignment, MetafileError, MetafileFormat, Pen,
+    PenStyle, Point, Rect, Renderer, ResourceLimits, Result, VerticalTextAlignment,
 };
 use metafile_dib::{crop_bitmap, decode_dib};
 use reader::Reader;
@@ -72,7 +72,11 @@ pub fn playback(
 ) -> Result<WmfPlaybackResult> {
     let parsed = parse(bytes, &options.limits)?;
     let mut diagnostics = parsed.info.warnings.clone();
-    let mut player = Player::new(parsed.info.object_count, options.limits.clone());
+    let mut player = Player::new(
+        parsed.info.object_count,
+        options.limits.clone(),
+        parsed.placeable_bounds,
+    );
     for entry in &parsed.records {
         player.play(entry, renderer, &mut diagnostics, options.strict)?;
     }
@@ -293,15 +297,17 @@ struct Player {
     objects: Vec<Option<GdiObject>>,
     limits: ResourceLimits,
     warning_counts: BTreeMap<String, u32>,
+    placeable_bounds: Option<Rect>,
 }
 impl Player {
-    fn new(objects: u16, limits: ResourceLimits) -> Self {
+    fn new(objects: u16, limits: ResourceLimits, placeable_bounds: Option<Rect>) -> Self {
         Self {
             dc: DeviceContext::default(),
             stack: Vec::new(),
             objects: vec![None; usize::from(objects)],
             limits,
             warning_counts: BTreeMap::new(),
+            placeable_bounds,
         }
     }
     fn play(
@@ -369,6 +375,21 @@ impl Player {
                         return Err(MetafileError::InvalidHeader(
                             "window extent contains zero".into(),
                         ));
+                    }
+                    // A placeable header defines the output-device rectangle. Some
+                    // producers establish only a logical window extent and rely on
+                    // the playback host to supply the matching viewport. Preserve
+                    // identity for files that never opt into window mapping, but
+                    // initialize that otherwise-implicit viewport when the first
+                    // anisotropic/isotropic window extent arrives.
+                    if self.dc.mapping.viewport_origin == Point::new(0.0, 0.0)
+                        && self.dc.mapping.viewport_extent == Point::new(1.0, 1.0)
+                    {
+                        if let Some(bounds) = self.placeable_bounds {
+                            self.dc.mapping.viewport_origin = Point::new(bounds.left, bounds.top);
+                            self.dc.mapping.viewport_extent =
+                                Point::new(bounds.width(), bounds.height());
+                        }
                     }
                     self.dc.mapping.window_extent = *p;
                     self.adjust_isotropic();
@@ -502,6 +523,7 @@ impl Player {
                         width: f64::from(width.unsigned_abs()),
                         cosmetic: *width == 0,
                         color: color(*c),
+                        ..Pen::default()
                     }),
                     e.index,
                 )?;
@@ -616,12 +638,13 @@ impl Player {
                     } else {
                         None
                     },
+                    background_path: None,
                     horizontal_align: horizontal_text_alignment(self.dc.text_align),
                     vertical_align: vertical_text_alignment(self.dc.text_align),
                     clip: if *extended && options & 0x0004 != 0 {
-                        mapped_rect
+                        mapped_rect.map(ClipRegion::Rect)
                     } else {
-                        self.clip()
+                        self.clip().cloned()
                     },
                     dx: dx
                         .iter()
@@ -692,8 +715,8 @@ impl Player {
     fn map_rect(&self, r: Rect) -> Rect {
         self.dc.mapping.transform_rect(r)
     }
-    fn clip(&self) -> Option<Rect> {
-        self.dc.clip
+    fn clip(&self) -> Option<&ClipRegion> {
+        self.dc.clip.as_ref()
     }
     fn mapped_pen(&self) -> Pen {
         let mut pen = self.dc.pen.clone();
@@ -832,15 +855,21 @@ impl Player {
     }
     fn intersect_clip(&mut self, b: Rect) {
         let b = b.normalized();
-        self.dc.clip = Some(match self.dc.clip {
+        let next = match self.dc.clip.as_ref() {
             None => b,
-            Some(a) => a.intersection(b).unwrap_or(Rect {
+            Some(ClipRegion::Rect(a)) => a.intersection(b).unwrap_or(Rect {
                 left: b.left,
                 top: b.top,
                 right: b.left,
                 bottom: b.top,
             }),
-        })
+            Some(
+                ClipRegion::Polygon(_) | ClipRegion::Path { .. } | ClipRegion::Intersection(_),
+            ) => {
+                unreachable!("WMF only creates rectangular clips")
+            }
+        };
+        self.dc.clip = Some(ClipRegion::Rect(next));
     }
     fn warn(&mut self, d: &mut Vec<Diagnostic>, e: &RecordEntry<'_>, code: &str, msg: &str) {
         let aggregation_key = format!("{code}:{:#06x}", e.function);
@@ -972,7 +1001,12 @@ impl Player {
                 } else {
                     BitmapSampling::Auto
                 };
-                r.bitmap(mapped_dest, &bitmap, sampling, self.clip())
+                r.bitmap(
+                    BitmapPlacement::from_rect(mapped_dest),
+                    &bitmap,
+                    sampling,
+                    self.clip(),
+                )
             }
             Err(err) => {
                 if matches!(err, MetafileError::UnsupportedBitmap { .. }) {
@@ -1132,17 +1166,13 @@ fn stock_object(index: u16) -> Option<GdiObject> {
             color: Color::WHITE,
         }),
         6 => GdiObject::Pen(Pen {
-            style: PenStyle::Solid,
-            width: 1.0,
-            cosmetic: true,
             color: Color::WHITE,
+            ..Pen::default()
         }),
         7 => GdiObject::Pen(Pen::default()),
         8 => GdiObject::Pen(Pen {
             style: PenStyle::Null,
-            width: 1.0,
-            cosmetic: true,
-            color: Color::BLACK,
+            ..Pen::default()
         }),
         10..=17 => GdiObject::Font(Font::default()),
         _ => return None,

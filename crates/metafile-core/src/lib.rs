@@ -232,6 +232,11 @@ impl Default for RenderOptions {
 pub enum MetafileError {
     #[error("unsupported metafile format")]
     UnsupportedFormat,
+    #[error("metafile format mismatch: expected {expected:?}, received {actual:?}")]
+    FormatMismatch {
+        expected: MetafileFormat,
+        actual: MetafileFormat,
+    },
     #[error("invalid header: {0}")]
     InvalidHeader(String),
     #[error("invalid placeable header: {0}")]
@@ -300,6 +305,20 @@ pub enum PenStyle {
     Unknown(u16),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pen {
     pub style: PenStyle,
@@ -307,6 +326,8 @@ pub struct Pen {
     /// A cosmetic pen remains one output-device pixel wide regardless of mapping scale.
     pub cosmetic: bool,
     pub color: Color,
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
 }
 impl Default for Pen {
     fn default() -> Self {
@@ -315,6 +336,8 @@ impl Default for Pen {
             width: 1.0,
             cosmetic: true,
             color: Color::BLACK,
+            line_cap: LineCap::Butt,
+            line_join: LineJoin::Miter,
         }
     }
 }
@@ -529,7 +552,7 @@ pub struct DeviceContext {
     pub mapper_flags: u32,
     pub mapping: Mapping,
     pub world_transform: Transform,
-    pub clip: Option<Rect>,
+    pub clip: Option<ClipRegion>,
     pub selected_pen: Option<u16>,
     pub selected_brush: Option<u16>,
     pub selected_font: Option<u16>,
@@ -568,9 +591,10 @@ pub struct TextRun {
     pub color: Color,
     pub background: Option<Color>,
     pub background_rect: Option<Rect>,
+    pub background_path: Option<Path>,
     pub horizontal_align: HorizontalTextAlignment,
     pub vertical_align: VerticalTextAlignment,
-    pub clip: Option<Rect>,
+    pub clip: Option<ClipRegion>,
     pub dx: Vec<f64>,
 }
 
@@ -593,6 +617,58 @@ pub struct Bitmap {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+/// A renderer-neutral clipping region. `Polygon` vertices describe one closed,
+/// convex region in output coordinates. An empty polygon clips all output.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipRegion {
+    Rect(Rect),
+    Polygon(Vec<Point>),
+    Path { path: Path, fill_mode: u16 },
+    Intersection(Vec<ClipRegion>),
+}
+
+impl ClipRegion {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Rect(rect) => rect.width() == 0.0 || rect.height() == 0.0,
+            Self::Polygon(points) => points.len() < 3,
+            Self::Path { path, .. } => path.figures.is_empty(),
+            Self::Intersection(regions) => regions.is_empty() || regions.iter().any(Self::is_empty),
+        }
+    }
+}
+
+/// Placement of a bitmap's normalized unit square in output coordinates.
+/// This represents translation, scaling, mirroring, rotation, and shear
+/// without coupling the core renderer contract to SVG matrices.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BitmapPlacement {
+    pub origin: Point,
+    pub x_axis: Vector,
+    pub y_axis: Vector,
+}
+
+impl BitmapPlacement {
+    #[must_use]
+    pub fn from_rect(rect: Rect) -> Self {
+        Self {
+            origin: Point::new(rect.left, rect.top),
+            x_axis: Vector::new(rect.right - rect.left, 0.0),
+            y_axis: Vector::new(0.0, rect.bottom - rect.top),
+        }
+    }
+
+    #[must_use]
+    pub fn corners(self) -> [Point; 4] {
+        let top_left = self.origin;
+        let top_right = Point::new(self.origin.x + self.x_axis.x, self.origin.y + self.x_axis.y);
+        let bottom_left = Point::new(self.origin.x + self.y_axis.x, self.origin.y + self.y_axis.y);
+        let bottom_right = Point::new(top_right.x + self.y_axis.x, top_right.y + self.y_axis.y);
+        [top_left, top_right, bottom_right, bottom_left]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,15 +702,15 @@ pub enum PathSegment {
 
 pub trait Renderer {
     fn drawing_bounds(&self) -> Option<Rect>;
-    fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<Rect>) -> Result<()>;
-    fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<Rect>) -> Result<()>;
+    fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<&ClipRegion>) -> Result<()>;
+    fn polyline(&mut self, points: &[Point], pen: &Pen, clip: Option<&ClipRegion>) -> Result<()>;
     fn polygon(
         &mut self,
         points: &[Point],
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
     fn poly_polygon(
         &mut self,
@@ -642,7 +718,7 @@ pub trait Renderer {
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
     fn path(
         &mut self,
@@ -652,7 +728,7 @@ pub trait Renderer {
         fill_mode: u16,
         stroke: bool,
         fill: bool,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
     fn rectangle(
         &mut self,
@@ -660,9 +736,15 @@ pub trait Renderer {
         radius: Option<Point>,
         pen: &Pen,
         brush: &Brush,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
-    fn ellipse(&mut self, rect: Rect, pen: &Pen, brush: &Brush, clip: Option<Rect>) -> Result<()>;
+    fn ellipse(
+        &mut self,
+        rect: Rect,
+        pen: &Pen,
+        brush: &Brush,
+        clip: Option<&ClipRegion>,
+    ) -> Result<()>;
     fn arc(
         &mut self,
         rect: Rect,
@@ -672,16 +754,16 @@ pub trait Renderer {
         clockwise: bool,
         pen: &Pen,
         brush: &Brush,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
-    fn pixel(&mut self, point: Point, color: Color, clip: Option<Rect>) -> Result<()>;
+    fn pixel(&mut self, point: Point, color: Color, clip: Option<&ClipRegion>) -> Result<()>;
     fn text(&mut self, run: &TextRun) -> Result<()>;
     fn bitmap(
         &mut self,
-        dest: Rect,
+        placement: BitmapPlacement,
         bitmap: &Bitmap,
         sampling: BitmapSampling,
-        clip: Option<Rect>,
+        clip: Option<&ClipRegion>,
     ) -> Result<()>;
 }
 

@@ -46,6 +46,7 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
     };
     let code = match &e {
         metafile_core::MetafileError::UnsupportedFormat => "unsupported_format",
+        metafile_core::MetafileError::FormatMismatch { .. } => "format_mismatch",
         metafile_core::MetafileError::InvalidHeader(_) => "invalid_header",
         metafile_core::MetafileError::InvalidPlaceableHeader(_) => "invalid_placeable_header",
         metafile_core::MetafileError::InvalidChecksum { .. } => "invalid_checksum",
@@ -72,10 +73,24 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
 }
 #[wasm_bindgen(js_name = inspectWmf)]
 pub fn inspect_wmf(bytes: &[u8]) -> Result<JsValue, JsValue> {
-    inspect_metafile(bytes)
+    let info = inspect(bytes).map_err(error)?;
+    if info.format != metafile_core::MetafileFormat::Wmf {
+        return Err(error(metafile_core::MetafileError::FormatMismatch {
+            expected: metafile_core::MetafileFormat::Wmf,
+            actual: info.format,
+        }));
+    }
+    js(&info)
 }
 #[wasm_bindgen(js_name = wmfToSvg)]
 pub fn wmf_to_svg(bytes: &[u8], options: Option<JsValue>) -> Result<JsValue, JsValue> {
+    let info = inspect(bytes).map_err(error)?;
+    if info.format != metafile_core::MetafileFormat::Wmf {
+        return Err(error(metafile_core::MetafileError::FormatMismatch {
+            expected: metafile_core::MetafileFormat::Wmf,
+            actual: info.format,
+        }));
+    }
     metafile_to_svg(bytes, options)
 }
 

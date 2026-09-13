@@ -38,6 +38,15 @@ const emfFirst = metafileToSvg(emf, { strict: false });
 const emfSecond = metafileToSvg(emf, { strict: false });
 if (emfInfo.format !== "emf" || !emfFirst.svg.includes("<svg") || emfFirst.svg !== emfSecond.svg) throw new Error("EMF render failed");
 
+for (const call of [() => inspectWmf(emf), () => wmfToSvg(emf, { strict: false })]) {
+  try {
+    call();
+    throw new Error("WMF compatibility API accepted EMF input");
+  } catch (error) {
+    if (error?.code !== "format_mismatch") throw new Error("WMF compatibility API did not return a structured format mismatch");
+  }
+}
+
 try {
   inspectMetafile(new Uint8Array([1, 2, 3]));
   throw new Error("malformed input unexpectedly succeeded");

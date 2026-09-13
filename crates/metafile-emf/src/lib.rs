@@ -5,10 +5,10 @@ mod reader;
 use encoding_rs::{Encoding, WINDOWS_1252};
 pub use metafile_core::RenderOptions;
 use metafile_core::{
-    ArcKind, BitmapSampling, Brush, BrushStyle, Color, DeviceContext, Diagnostic, Font, GdiObject,
-    HorizontalTextAlignment, MetafileError, MetafileFormat, Path, PathFigure, PathSegment, Pen,
-    PenStyle, Point, Rect, Renderer, ResourceLimits, Result, Transform, Vector,
-    VerticalTextAlignment,
+    ArcKind, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipRegion, Color, DeviceContext,
+    Diagnostic, Font, GdiObject, HorizontalTextAlignment, LineCap, LineJoin, MetafileError,
+    MetafileFormat, Path, PathFigure, PathSegment, Pen, PenStyle, Point, Rect, Renderer,
+    ResourceLimits, Result, Transform, Vector, VerticalTextAlignment,
 };
 use metafile_dib::{crop_bitmap, decode_dib};
 use reader::Reader;
@@ -87,8 +87,15 @@ pub fn playback(
     for record in &parsed.records {
         player.play(*record, renderer, &mut diagnostics, options.strict)?;
     }
-    let output_bounds = Some(parsed.info.bounds)
-        .filter(|bounds| bounds.width() > 0.0 && bounds.height() > 0.0)
+    // rclBounds is an ink bound, while rclFrame is the metafile's physical
+    // canvas in 0.01 mm units. Convert the frame back into device units when
+    // the header supplies a trustworthy device/mm relationship so whitespace
+    // and placement survive playback. Fall back to ink/playback bounds for
+    // older or incomplete headers.
+    let output_bounds = frame_device_bounds(&parsed.info)
+        .or_else(|| {
+            Some(parsed.info.bounds).filter(|bounds| bounds.width() > 0.0 && bounds.height() > 0.0)
+        })
         .or_else(|| renderer.drawing_bounds());
     let frame = parsed.info.frame;
     let physical_size = if frame.width() > 0.0 && frame.height() > 0.0 {
@@ -105,6 +112,31 @@ pub fn playback(
         output_bounds,
         physical_size,
     })
+}
+
+fn frame_device_bounds(info: &EmfInfo) -> Option<Rect> {
+    if info.frame.width() <= 0.0
+        || info.frame.height() <= 0.0
+        || info.device_width <= 0
+        || info.device_height <= 0
+        || info.millimeters_width <= 0
+        || info.millimeters_height <= 0
+    {
+        return None;
+    }
+    let scale_x = f64::from(info.device_width) / (f64::from(info.millimeters_width) * 100.0);
+    let scale_y = f64::from(info.device_height) / (f64::from(info.millimeters_height) * 100.0);
+    let bounds = Rect {
+        left: info.frame.left * scale_x,
+        top: info.frame.top * scale_y,
+        right: info.frame.right * scale_x,
+        bottom: info.frame.bottom * scale_y,
+    };
+    (bounds.left.is_finite()
+        && bounds.top.is_finite()
+        && bounds.right.is_finite()
+        && bounds.bottom.is_finite())
+    .then_some(bounds)
 }
 
 fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
@@ -333,7 +365,9 @@ fn read_description(
         ));
     }
     let units: Vec<u16> = bytes[start..end]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .take_while(|unit| *unit != 0)
         .collect();
@@ -467,6 +501,20 @@ impl Player {
         strict: bool,
     ) -> Result<()> {
         let payload = &record.bytes[8..];
+        if matches!(
+            record.kind,
+            2..=8 | 42..=47 | 54 | 55 | 63 | 64 | 85..=91
+        ) && !self.dc.core.pen.cosmetic
+            && !self.pen_transform_is_similarity()
+        {
+            self.unsupported(
+                record,
+                diagnostics,
+                strict,
+                "geometric_pen_transform_approximate",
+                "a geometric pen under non-uniform scale or shear is approximated by a scalar SVG stroke width",
+            )?;
+        }
         match record.kind {
             EMR_EOF => Ok(()),
             9 => self.set_extent(payload, true),
@@ -532,7 +580,7 @@ impl Player {
                 diagnostics,
                 strict,
                 "exclude_clip_rect",
-                "EMR_EXCLUDECLIPRECT cannot be represented by rectangular clipping",
+                "EMR_EXCLUDECLIPRECT region subtraction is not yet represented",
             ),
             30 => self.intersect_clip(payload, record.offset + 8),
             31 => self.scale_extent(payload, false),
@@ -590,6 +638,7 @@ impl Player {
             62 => self.render_path(record, renderer, false, true, diagnostics, strict),
             63 => self.render_path(record, renderer, true, true, diagnostics, strict),
             64 => self.render_path(record, renderer, true, false, diagnostics, strict),
+            67 => self.select_clip_path(payload, record, diagnostics, strict),
             68 => {
                 self.active_path = None;
                 self.completed_path = None;
@@ -655,19 +704,46 @@ impl Player {
             .transform_vector(self.dc.core.world_transform.transform_vector(vector))
     }
 
-    fn transform_rect(&self, rect: Rect) -> Rect {
-        let a = self.transform(Point::new(rect.left, rect.top));
-        let b = self.transform(Point::new(rect.right, rect.bottom));
-        Rect {
-            left: a.x,
-            top: a.y,
-            right: b.x,
-            bottom: b.y,
+    fn transform_rect_points(&self, rect: Rect) -> [Point; 4] {
+        [
+            self.transform(Point::new(rect.left, rect.top)),
+            self.transform(Point::new(rect.right, rect.top)),
+            self.transform(Point::new(rect.right, rect.bottom)),
+            self.transform(Point::new(rect.left, rect.bottom)),
+        ]
+    }
+
+    fn transform_path(&self, path: &Path) -> Path {
+        Path {
+            figures: path
+                .figures
+                .iter()
+                .map(|figure| PathFigure {
+                    start: self.transform(figure.start),
+                    segments: figure
+                        .segments
+                        .iter()
+                        .map(|segment| match *segment {
+                            PathSegment::Line(point) => PathSegment::Line(self.transform(point)),
+                            PathSegment::Cubic {
+                                control1,
+                                control2,
+                                to,
+                            } => PathSegment::Cubic {
+                                control1: self.transform(control1),
+                                control2: self.transform(control2),
+                                to: self.transform(to),
+                            },
+                        })
+                        .collect(),
+                    closed: figure.closed,
+                })
+                .collect(),
         }
     }
 
-    fn clip(&self) -> Option<Rect> {
-        self.dc.core.clip
+    fn clip(&self) -> Option<&ClipRegion> {
+        self.dc.core.clip.as_ref()
     }
 
     fn effective_pen(&self) -> Pen {
@@ -679,21 +755,13 @@ impl Player {
         pen
     }
 
-    fn orientation_reversed(&self) -> bool {
-        let world = self.dc.core.world_transform;
-        let world_determinant = world.m11 * world.m22 - world.m12 * world.m21;
-        let mapping = self.dc.core.mapping;
-        let scale_x = if mapping.window_extent.x == 0.0 {
-            1.0
-        } else {
-            mapping.viewport_extent.x / mapping.window_extent.x
-        };
-        let scale_y = if mapping.window_extent.y == 0.0 {
-            1.0
-        } else {
-            mapping.viewport_extent.y / mapping.window_extent.y
-        };
-        world_determinant * scale_x * scale_y < 0.0
+    fn pen_transform_is_similarity(&self) -> bool {
+        let x = self.vector(Vector::new(1.0, 0.0));
+        let y = self.vector(Vector::new(0.0, 1.0));
+        let dot = x.x * y.x + x.y * y.y;
+        let x_length = x.x.hypot(x.y);
+        let y_length = y.x.hypot(y.y);
+        dot.abs() <= 1.0e-9 && (x_length - y_length).abs() <= 1.0e-9
     }
 
     fn set_origin(&mut self, payload: &[u8], window: bool) -> Result<()> {
@@ -803,11 +871,24 @@ impl Player {
     }
 
     fn modify_world_transform(&mut self, payload: &[u8], base: usize) -> Result<()> {
-        let transform = read_transform(payload, 0, base)?;
         let mode = read_u32(payload, 24, base)?;
+        if mode == 1 {
+            self.dc.core.world_transform = Transform::IDENTITY;
+            return Ok(());
+        }
+        let transform = read_transform(payload, 0, base)?;
+        if !transform.is_finite() {
+            return Err(MetafileError::InvalidHeader(
+                "non-finite world transform".into(),
+            ));
+        }
         self.dc.core.world_transform = match mode {
-            1 => Transform::IDENTITY,
+            // `compose(self, other)` returns other * self for GDI's row-vector
+            // XFORM layout. MS-EMF defines the supplied transform as the left
+            // multiplicand for MWT_LEFTMULTIPLY.
             2 => self.dc.core.world_transform.compose(transform),
+            // MWT_RIGHTMULTIPLY makes the supplied transform the right
+            // multiplicand.
             3 => transform.compose(self.dc.core.world_transform),
             4 => transform,
             _ => {
@@ -880,6 +961,7 @@ impl Player {
                 width: f64::from(width.unsigned_abs().max(1)),
                 cosmetic: true,
                 color,
+                ..Pen::default()
             }),
             record_index,
         )
@@ -908,6 +990,25 @@ impl Player {
                 "extended pens with non-solid brushes are not supported",
             )?;
         }
+        if style & 0x0000_000f > 5 {
+            self.unsupported(
+                record,
+                diagnostics,
+                strict,
+                "unsupported_extended_pen_style",
+                "extended user-style and alternate pens are not represented",
+            )?;
+        }
+        let line_cap = match style & 0x0000_0f00 {
+            0x0000_0100 => LineCap::Square,
+            0x0000_0200 => LineCap::Butt,
+            _ => LineCap::Round,
+        };
+        let line_join = match style & 0x0000_f000 {
+            0x0000_1000 => LineJoin::Bevel,
+            0x0000_2000 => LineJoin::Miter,
+            _ => LineJoin::Round,
+        };
         self.add_object(
             handle,
             GdiObject::Pen(Pen {
@@ -915,6 +1016,8 @@ impl Player {
                 width: f64::from(width.max(1)),
                 cosmetic: style & 0x0001_0000 == 0,
                 color,
+                line_cap,
+                line_join,
             }),
             record_index,
         )
@@ -961,7 +1064,7 @@ impl Player {
         require(payload, 4, 92, base)?;
         let font_data = &payload[4..];
         let mut units = Vec::new();
-        for pair in font_data[28..92].chunks_exact(2) {
+        for pair in font_data[28..92].as_chunks::<2>().0 {
             let unit = u16::from_le_bytes([pair[0], pair[1]]);
             if unit == 0 {
                 break;
@@ -1046,18 +1149,76 @@ impl Player {
     }
 
     fn intersect_clip(&mut self, payload: &[u8], base: usize) -> Result<()> {
-        let rect = self
-            .transform_rect(read_rect_at(payload, 0, base)?)
-            .normalized();
-        self.dc.core.clip = Some(match self.dc.core.clip {
-            Some(current) => current.intersection(rect).unwrap_or(Rect {
-                left: rect.left,
-                top: rect.top,
-                right: rect.left,
-                bottom: rect.top,
-            }),
-            None => rect,
-        });
+        let rect = read_rect_at(payload, 0, base)?;
+        let polygon = self.transform_rect_points(rect).to_vec();
+        let next = match self.dc.core.clip.as_ref() {
+            Some(current) => intersect_clip_polygon(current, &polygon),
+            None => ClipRegion::Polygon(polygon),
+        };
+        if let ClipRegion::Polygon(points) = &next {
+            if points.len() > self.limits.max_points_per_record {
+                return Err(MetafileError::ResourceLimitExceeded {
+                    resource: "clip polygon points",
+                    actual: points.len() as u64,
+                    limit: self.limits.max_points_per_record as u64,
+                });
+            }
+        }
+        self.dc.core.clip = Some(next);
+        Ok(())
+    }
+
+    fn select_clip_path(
+        &mut self,
+        payload: &[u8],
+        record: Record<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+        strict: bool,
+    ) -> Result<()> {
+        let mode = read_u32(payload, 0, record.offset + 8)?;
+        let Some(path) = self.completed_path.take() else {
+            return self.unsupported(
+                record,
+                diagnostics,
+                strict,
+                "select_clip_without_path",
+                "EMR_SELECTCLIPPATH has no completed path",
+            );
+        };
+        match mode {
+            5 => {
+                self.dc.core.clip = Some(ClipRegion::Path {
+                    path,
+                    fill_mode: self.dc.core.polygon_fill_mode,
+                })
+            } // RGN_COPY
+            1 => {
+                self.dc.core.clip = Some(match self.dc.core.clip.take() {
+                    Some(current) => intersect_regions(
+                        current,
+                        ClipRegion::Path {
+                            path,
+                            fill_mode: self.dc.core.polygon_fill_mode,
+                        },
+                    ),
+                    None => ClipRegion::Path {
+                        path,
+                        fill_mode: self.dc.core.polygon_fill_mode,
+                    },
+                });
+            }
+            _ => {
+                return self.unsupported(
+                    record,
+                    diagnostics,
+                    strict,
+                    "unsupported_clip_combine_mode",
+                    &format!(
+                        "EMR_SELECTCLIPPATH combine mode {mode} is not faithfully represented"
+                    ),
+                )
+            }
+        }
         Ok(())
     }
 
@@ -1081,51 +1242,61 @@ impl Player {
         let payload = &record.bytes[8..];
         let pen = self.effective_pen();
         match record.kind {
-            42 => renderer.ellipse(
-                self.transform_rect(read_rect_at(payload, 0, record.offset + 8)?),
-                &pen,
-                &self.dc.core.brush,
-                self.clip(),
-            ),
-            43 => renderer.rectangle(
-                self.transform_rect(read_rect_at(payload, 0, record.offset + 8)?),
-                None,
-                &pen,
-                &self.dc.core.brush,
-                self.clip(),
-            ),
-            44 => {
-                let rect = self.transform_rect(read_rect_at(payload, 0, record.offset + 8)?);
-                let size = self.vector(Vector::new(
-                    f64::from(read_i32(payload, 16, record.offset + 8)?),
-                    f64::from(read_i32(payload, 20, record.offset + 8)?),
-                ));
-                renderer.rectangle(
-                    rect,
-                    Some(Point::new(size.x, size.y)),
+            42..=44 => {
+                let rect = read_rect_at(payload, 0, record.offset + 8)?;
+                let logical_path = match record.kind {
+                    42 => ellipse_path(rect),
+                    43 => rectangle_path(rect),
+                    44 => {
+                        let corner = Point::new(
+                            f64::from(read_i32(payload, 16, record.offset + 8)?),
+                            f64::from(read_i32(payload, 20, record.offset + 8)?),
+                        );
+                        round_rectangle_path(rect, corner)
+                    }
+                    _ => unreachable!(),
+                };
+                let path = self.transform_path(&logical_path);
+                renderer.path(
+                    &path,
                     &pen,
                     &self.dc.core.brush,
+                    self.dc.core.polygon_fill_mode,
+                    true,
+                    true,
                     self.clip(),
                 )
             }
             45 | 46 | 47 | 55 => {
-                let rect = self.transform_rect(read_rect_at(payload, 0, record.offset + 8)?);
-                let start = self.transform(read_point(payload, 16, record.offset + 8)?);
-                let end = self.transform(read_point(payload, 24, record.offset + 8)?);
-                let clockwise = self.dc.arc_clockwise ^ self.orientation_reversed();
+                let rect = read_rect_at(payload, 0, record.offset + 8)?;
+                let start = read_point(payload, 16, record.offset + 8)?;
+                let end = read_point(payload, 24, record.offset + 8)?;
+                let clockwise = self.dc.arc_clockwise;
                 let kind = match record.kind {
                     46 => ArcKind::Chord,
                     47 => ArcKind::Pie,
                     _ => ArcKind::Arc,
                 };
-                let (arc_start, segments) = ellipse_arc_segments(rect, start, end, clockwise);
+                let (logical_arc_start, logical_segments) =
+                    ellipse_arc_segments(rect, start, end, clockwise);
+                let arc_start = self.transform(logical_arc_start);
+                let segments: Vec<_> = logical_segments
+                    .iter()
+                    .map(|(control1, control2, to)| {
+                        (
+                            self.transform(*control1),
+                            self.transform(*control2),
+                            self.transform(*to),
+                        )
+                    })
+                    .collect();
                 if self.active_path.is_some() {
                     self.add_path_points(segments.len().saturating_mul(3).saturating_add(2))?;
                     let current = self.transform(self.dc.core.current_position);
-                    let center = Point::new(
+                    let center = self.transform(Point::new(
                         rect.left.midpoint(rect.right),
                         rect.top.midpoint(rect.bottom),
-                    );
+                    ));
                     let Some(path) = self.active_path.as_mut() else {
                         return Ok(());
                     };
@@ -1151,30 +1322,55 @@ impl Player {
                         path.close();
                     }
                     if record.kind == 55 {
-                        self.dc.core.current_position = read_point(payload, 24, record.offset + 8)?;
+                        self.dc.core.current_position = logical_segments
+                            .last()
+                            .map_or(logical_arc_start, |segment| segment.2);
                     }
                     return Ok(());
                 }
-                if record.kind == 55 {
-                    renderer.line(
-                        self.transform(self.dc.core.current_position),
-                        arc_start,
-                        &pen,
-                        self.clip(),
-                    )?;
+                let center = self.transform(Point::new(
+                    rect.left.midpoint(rect.right),
+                    rect.top.midpoint(rect.bottom),
+                ));
+                let mut figure = PathFigure {
+                    start: if kind == ArcKind::Pie {
+                        center
+                    } else {
+                        arc_start
+                    },
+                    segments: Vec::new(),
+                    closed: false,
+                };
+                if kind == ArcKind::Pie {
+                    figure.segments.push(PathSegment::Line(arc_start));
+                } else if record.kind == 55 {
+                    figure.start = self.transform(self.dc.core.current_position);
+                    figure.segments.push(PathSegment::Line(arc_start));
                 }
-                renderer.arc(
-                    rect,
-                    start,
-                    end,
-                    kind,
-                    clockwise,
+                for (control1, control2, to) in segments {
+                    figure.segments.push(PathSegment::Cubic {
+                        control1,
+                        control2,
+                        to,
+                    });
+                }
+                figure.closed = matches!(kind, ArcKind::Pie | ArcKind::Chord);
+                let path = Path {
+                    figures: vec![figure],
+                };
+                renderer.path(
+                    &path,
                     &pen,
                     &self.dc.core.brush,
+                    self.dc.core.polygon_fill_mode,
+                    true,
+                    kind != ArcKind::Arc,
                     self.clip(),
                 )?;
                 if record.kind == 55 {
-                    self.dc.core.current_position = read_point(payload, 24, record.offset + 8)?;
+                    self.dc.core.current_position = logical_segments
+                        .last()
+                        .map_or(logical_arc_start, |segment| segment.2);
                 }
                 Ok(())
             }
@@ -1205,6 +1401,21 @@ impl Player {
         let pen = self.effective_pen();
         match normalized_kind {
             2 => self.bezier(points, false, renderer),
+            3 | 4 if self.active_path.is_some() => {
+                self.add_path_points(points.len())?;
+                if let (Some(first), Some(path)) = (points.first(), self.active_path.as_mut()) {
+                    path.move_to(*first);
+                    let mut previous = *first;
+                    for point in &points[1..] {
+                        path.line_to(previous, *point);
+                        previous = *point;
+                    }
+                    if normalized_kind == 3 {
+                        path.close();
+                    }
+                }
+                Ok(())
+            }
             3 => renderer.polygon(
                 &points,
                 &pen,
@@ -1293,7 +1504,7 @@ impl Player {
             record.offset + 8,
         )?;
         let mut cursor = 0;
-        let mut output = Vec::with_capacity(groups);
+        let mut output: Vec<Vec<Point>> = Vec::with_capacity(groups);
         for count in counts {
             output.push(
                 points[cursor..cursor + count]
@@ -1304,6 +1515,25 @@ impl Player {
             cursor += count;
         }
         let pen = self.effective_pen();
+        if self.active_path.is_some() {
+            self.add_path_points(total)?;
+            if let Some(path) = &mut self.active_path {
+                for points in output {
+                    if let Some(first) = points.first() {
+                        path.move_to(*first);
+                        let mut previous = *first;
+                        for point in &points[1..] {
+                            path.line_to(previous, *point);
+                            previous = *point;
+                        }
+                        if polygon {
+                            path.close();
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         if polygon {
             renderer.poly_polygon(
                 &output,
@@ -1336,7 +1566,7 @@ impl Player {
         }
         let mut path = PathBuilder::new();
         path.move_to(cursor);
-        for chunk in controls.chunks_exact(3) {
+        for chunk in controls.as_chunks::<3>().0 {
             path.bezier_to(cursor, chunk[0], chunk[1], chunk[2]);
             cursor = chunk[2];
         }
@@ -1478,7 +1708,9 @@ impl Player {
                 .ok_or_else(|| MetafileError::InvalidHeader("UTF-16 length overflow".into()))?;
             require(bytes, string_offset, byte_count, record.offset)?;
             let units: Vec<u16> = bytes[string_offset..string_offset + byte_count]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
             if let Ok(text) = String::from_utf16(&units) {
@@ -1537,8 +1769,13 @@ impl Player {
                     .ok_or_else(|| MetafileError::InvalidHeader("dx length overflow".into()))?,
                 record.offset,
             )?;
+            let advance_stride = if options & 0x2000 != 0 { 8 } else { 4 };
             for index in 0..count {
-                let advance = f64::from(read_i32(bytes, dx_offset + index * 4, record.offset)?);
+                let advance = f64::from(read_i32(
+                    bytes,
+                    dx_offset + index * advance_stride,
+                    record.offset,
+                )?);
                 logical_advance += advance;
                 dx.push(self.vector(Vector::new(advance, 0.0)).x);
             }
@@ -1560,37 +1797,52 @@ impl Player {
                 "text has no explicit advances; host SVG font metrics are approximate",
             )?;
         }
+        let x_axis = self.vector(Vector::new(1.0, 0.0));
+        let y_axis = self.vector(Vector::new(0.0, 1.0));
+        if x_axis.y.abs() > 1.0e-9 || y_axis.x.abs() > 1.0e-9 {
+            self.unsupported(
+                record,
+                diagnostics,
+                strict,
+                "affine_text_approximate",
+                "rotated or sheared world-transform text is positioned but its glyph coordinate system is approximated",
+            )?;
+        }
         let position = if self.dc.core.text_align & 1 != 0 {
             self.transform(self.dc.core.current_position)
         } else {
             self.transform(reference)
         };
-        let clip_rect = (options & 4 != 0).then(|| self.transform_rect(opaque_rect));
+        let option_rect_path = self.transform_path(&rectangle_path(opaque_rect));
+        let option_clip = (options & 4 != 0)
+            .then(|| ClipRegion::Polygon(self.transform_rect_points(opaque_rect).to_vec()));
         let run = metafile_core::TextRun {
             position,
             text,
             font: {
                 let mut font = self.dc.core.font.clone();
-                font.height = self.vector(Vector::new(0.0, font.height)).y.abs().max(1.0);
+                let height = self.vector(Vector::new(0.0, font.height));
+                font.height = height.x.hypot(height.y).max(1.0);
                 font
             },
             color: self.dc.core.text_color,
             background: (options & 2 != 0 || self.dc.core.background_opaque)
                 .then_some(self.dc.core.background_color),
-            background_rect: (options & 2 != 0).then(|| self.transform_rect(opaque_rect)),
+            background_rect: None,
+            background_path: (options & 2 != 0).then_some(option_rect_path),
             horizontal_align: match self.dc.core.text_align & 6 {
                 6 => HorizontalTextAlignment::Center,
                 2 => HorizontalTextAlignment::Right,
                 _ => HorizontalTextAlignment::Left,
             },
-            vertical_align: if self.dc.core.text_align & 24 == 24 {
+            vertical_align: if self.dc.core.text_align & 0x0018 == 0x0018 {
                 VerticalTextAlignment::Baseline
             } else if self.dc.core.text_align & 8 != 0 {
                 VerticalTextAlignment::Bottom
             } else {
                 VerticalTextAlignment::Top
             },
-            clip: combine_clip(self.clip(), clip_rect),
+            clip: combine_clip(self.clip(), option_clip),
             dx: dx.clone(),
         };
         renderer.text(&run)?;
@@ -1696,8 +1948,12 @@ impl Player {
                     f64::from(destination_x),
                     f64::from(destination_y),
                 ));
-                let bottom_right = self.transform(Point::new(
+                let top_right = self.transform(Point::new(
                     f64::from(destination_x) + f64::from(destination_width),
+                    f64::from(destination_y),
+                ));
+                let bottom_left = self.transform(Point::new(
+                    f64::from(destination_x),
                     f64::from(destination_y) + f64::from(destination_height),
                 ));
                 let sampling = match self.dc.core.stretch_mode {
@@ -1725,11 +1981,10 @@ impl Player {
                     _ => BitmapSampling::Auto,
                 };
                 renderer.bitmap(
-                    Rect {
-                        left: top_left.x,
-                        top: top_left.y,
-                        right: bottom_right.x,
-                        bottom: bottom_right.y,
+                    BitmapPlacement {
+                        origin: top_left,
+                        x_axis: Vector::new(top_right.x - top_left.x, top_right.y - top_left.y),
+                        y_axis: Vector::new(bottom_left.x - top_left.x, bottom_left.y - top_left.y),
                     },
                     &bitmap,
                     sampling,
@@ -1979,15 +2234,25 @@ fn stock_object(index: u32) -> Option<GdiObject> {
     })
 }
 
-fn combine_clip(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
+fn combine_clip(a: Option<&ClipRegion>, b: Option<ClipRegion>) -> Option<ClipRegion> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(a.intersection(b).unwrap_or(Rect {
-            left: b.left,
-            top: b.top,
-            right: b.left,
-            bottom: b.top,
-        })),
-        (Some(a), None) => Some(a),
+        (Some(a), Some(ClipRegion::Polygon(points))) => Some(intersect_clip_polygon(a, &points)),
+        (Some(a), Some(ClipRegion::Rect(rect))) => {
+            let r = rect.normalized();
+            Some(intersect_clip_polygon(
+                a,
+                &[
+                    Point::new(r.left, r.top),
+                    Point::new(r.right, r.top),
+                    Point::new(r.right, r.bottom),
+                    Point::new(r.left, r.bottom),
+                ],
+            ))
+        }
+        (Some(a), Some(b @ (ClipRegion::Path { .. } | ClipRegion::Intersection(_)))) => {
+            Some(intersect_regions(a.clone(), b))
+        }
+        (Some(a), None) => Some(a.clone()),
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
@@ -2045,6 +2310,190 @@ fn ellipse_arc_segments(
         segments.push((control1, control2, to));
     }
     (first, segments)
+}
+
+fn rectangle_path(rect: Rect) -> Path {
+    let r = rect.normalized();
+    Path {
+        figures: vec![PathFigure {
+            start: Point::new(r.left, r.top),
+            segments: vec![
+                PathSegment::Line(Point::new(r.right, r.top)),
+                PathSegment::Line(Point::new(r.right, r.bottom)),
+                PathSegment::Line(Point::new(r.left, r.bottom)),
+            ],
+            closed: true,
+        }],
+    }
+}
+
+fn intersect_clip_polygon(current: &ClipRegion, incoming: &[Point]) -> ClipRegion {
+    let subject = match current {
+        ClipRegion::Rect(rect) => {
+            let r = rect.normalized();
+            vec![
+                Point::new(r.left, r.top),
+                Point::new(r.right, r.top),
+                Point::new(r.right, r.bottom),
+                Point::new(r.left, r.bottom),
+            ]
+        }
+        ClipRegion::Polygon(points) => points.clone(),
+        ClipRegion::Path { .. } | ClipRegion::Intersection(_) => {
+            return intersect_regions(current.clone(), ClipRegion::Polygon(incoming.to_vec()));
+        }
+    };
+    if subject.len() < 3 || incoming.len() < 3 {
+        return ClipRegion::Polygon(Vec::new());
+    }
+
+    let signed_area = incoming
+        .iter()
+        .zip(incoming.iter().cycle().skip(1))
+        .take(incoming.len())
+        .map(|(a, b)| a.x * b.y - b.x * a.y)
+        .sum::<f64>();
+    let orientation = signed_area.signum();
+    if orientation == 0.0 {
+        return ClipRegion::Polygon(Vec::new());
+    }
+
+    let mut output = subject;
+    for (edge_start, edge_end) in incoming
+        .iter()
+        .zip(incoming.iter().cycle().skip(1))
+        .take(incoming.len())
+    {
+        let input = std::mem::take(&mut output);
+        if input.is_empty() {
+            break;
+        }
+        let inside = |point: Point| {
+            orientation
+                * ((edge_end.x - edge_start.x) * (point.y - edge_start.y)
+                    - (edge_end.y - edge_start.y) * (point.x - edge_start.x))
+                >= -1.0e-9
+        };
+        let intersection = |from: Point, to: Point| {
+            let edge_x = edge_end.x - edge_start.x;
+            let edge_y = edge_end.y - edge_start.y;
+            let line_x = to.x - from.x;
+            let line_y = to.y - from.y;
+            let denominator = line_x * edge_y - line_y * edge_x;
+            if denominator.abs() <= f64::EPSILON {
+                return to;
+            }
+            let t =
+                ((edge_start.x - from.x) * edge_y - (edge_start.y - from.y) * edge_x) / denominator;
+            Point::new(from.x + t * line_x, from.y + t * line_y)
+        };
+        let mut previous = *input.last().unwrap_or(edge_start);
+        let mut previous_inside = inside(previous);
+        for current in input {
+            let current_inside = inside(current);
+            if current_inside != previous_inside {
+                output.push(intersection(previous, current));
+            }
+            if current_inside {
+                output.push(current);
+            }
+            previous = current;
+            previous_inside = current_inside;
+        }
+    }
+    ClipRegion::Polygon(output)
+}
+
+fn intersect_regions(left: ClipRegion, right: ClipRegion) -> ClipRegion {
+    let mut regions = match left {
+        ClipRegion::Intersection(regions) => regions,
+        region => vec![region],
+    };
+    match right {
+        ClipRegion::Intersection(mut nested) => regions.append(&mut nested),
+        region => regions.push(region),
+    }
+    ClipRegion::Intersection(regions)
+}
+
+fn ellipse_path(rect: Rect) -> Path {
+    let r = rect.normalized();
+    let cx = r.left.midpoint(r.right);
+    let cy = r.top.midpoint(r.bottom);
+    let rx = r.width() / 2.0;
+    let ry = r.height() / 2.0;
+    let kx = rx * 0.552_284_749_830_793_6;
+    let ky = ry * 0.552_284_749_830_793_6;
+    Path {
+        figures: vec![PathFigure {
+            start: Point::new(cx + rx, cy),
+            segments: vec![
+                PathSegment::Cubic {
+                    control1: Point::new(cx + rx, cy + ky),
+                    control2: Point::new(cx + kx, cy + ry),
+                    to: Point::new(cx, cy + ry),
+                },
+                PathSegment::Cubic {
+                    control1: Point::new(cx - kx, cy + ry),
+                    control2: Point::new(cx - rx, cy + ky),
+                    to: Point::new(cx - rx, cy),
+                },
+                PathSegment::Cubic {
+                    control1: Point::new(cx - rx, cy - ky),
+                    control2: Point::new(cx - kx, cy - ry),
+                    to: Point::new(cx, cy - ry),
+                },
+                PathSegment::Cubic {
+                    control1: Point::new(cx + kx, cy - ry),
+                    control2: Point::new(cx + rx, cy - ky),
+                    to: Point::new(cx + rx, cy),
+                },
+            ],
+            closed: true,
+        }],
+    }
+}
+
+fn round_rectangle_path(rect: Rect, corner: Point) -> Path {
+    let r = rect.normalized();
+    let rx = (corner.x.abs() / 2.0).min(r.width() / 2.0);
+    let ry = (corner.y.abs() / 2.0).min(r.height() / 2.0);
+    if rx == 0.0 || ry == 0.0 {
+        return rectangle_path(r);
+    }
+    let k = 0.552_284_749_830_793_6;
+    Path {
+        figures: vec![PathFigure {
+            start: Point::new(r.left + rx, r.top),
+            segments: vec![
+                PathSegment::Line(Point::new(r.right - rx, r.top)),
+                PathSegment::Cubic {
+                    control1: Point::new(r.right - rx + rx * k, r.top),
+                    control2: Point::new(r.right, r.top + ry - ry * k),
+                    to: Point::new(r.right, r.top + ry),
+                },
+                PathSegment::Line(Point::new(r.right, r.bottom - ry)),
+                PathSegment::Cubic {
+                    control1: Point::new(r.right, r.bottom - ry + ry * k),
+                    control2: Point::new(r.right - rx + rx * k, r.bottom),
+                    to: Point::new(r.right - rx, r.bottom),
+                },
+                PathSegment::Line(Point::new(r.left + rx, r.bottom)),
+                PathSegment::Cubic {
+                    control1: Point::new(r.left + rx - rx * k, r.bottom),
+                    control2: Point::new(r.left, r.bottom - ry + ry * k),
+                    to: Point::new(r.left, r.bottom - ry),
+                },
+                PathSegment::Line(Point::new(r.left, r.top + ry)),
+                PathSegment::Cubic {
+                    control1: Point::new(r.left, r.top + ry - ry * k),
+                    control2: Point::new(r.left + rx - rx * k, r.top),
+                    to: Point::new(r.left + rx, r.top),
+                },
+            ],
+            closed: true,
+        }],
+    }
 }
 
 fn decode_ansi_text(bytes: &[u8], charset: u8) -> (String, bool, bool) {

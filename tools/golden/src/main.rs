@@ -73,9 +73,12 @@ fn profile(name: &str) -> Result<Thresholds, Box<dyn Error>> {
             bounds_delta: 3,
         },
         "bitmap" => Thresholds {
-            mae: 10.0,
-            rms: 35.0,
-            differing: 25.0,
+            mae: 15.0,
+            rms: 38.0,
+            // Windows GDI+ and resvg use different interpolation kernels. Keep
+            // geometry tightly gated while allowing the measured resampling
+            // noise across otherwise matching bitmap areas.
+            differing: 27.0,
             bounds_delta: 3,
         },
         "text" => Thresholds {

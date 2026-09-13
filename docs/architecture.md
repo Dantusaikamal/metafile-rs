@@ -18,8 +18,10 @@ Metafile records never append SVG directly. Playback mutates a complete device
 context and emits mapped graphics primitives. This boundary is intended for
 future EMF+ playback and other renderer backends.
 
-Affine world transforms and generic line/cubic path figures are format-neutral
-core concepts. EMF uses 32-bit object handles internally while emitting the same
+Affine world transforms, generic line/cubic path figures, fill-rule-aware polygon/path clip
+regions, and affine bitmap placement are format-neutral core concepts. EMF
+converts boxes, ellipses, and arcs to paths before applying arbitrary affine
+transforms. EMF uses 32-bit object handles internally while emitting the same
 pen, brush, font, text, bitmap, clip, primitive, and path events as WMF.
 
 Points and vectors have distinct mapping operations. Origins affect points and

@@ -18,6 +18,16 @@ fn i32s(values: &[i32]) -> Vec<u8> {
         .collect()
 }
 
+fn transform(values: [f32; 6]) -> Vec<u8> {
+    values.into_iter().flat_map(f32::to_le_bytes).collect()
+}
+
+fn modify_transform(values: [f32; 6], mode: u32) -> Vec<u8> {
+    let mut payload = transform(values);
+    payload.extend_from_slice(&mode.to_le_bytes());
+    payload
+}
+
 fn emf(records: &[Vec<u8>]) -> Vec<u8> {
     let mut output = vec![0; 88];
     output[0..4].copy_from_slice(&1u32.to_le_bytes());
@@ -59,6 +69,15 @@ fn inspects_valid_header() {
     assert_eq!(info.bounds.width(), 200.0);
     assert_eq!(info.parsed_record_count, 2);
     assert!(info.has_eof);
+}
+
+#[test]
+fn physical_frame_preserves_canvas_beyond_ink_bounds() {
+    let mut input = emf(&[record(27, &i32s(&[60, 40])), record(54, &i32s(&[80, 60]))]);
+    input[8..24].copy_from_slice(&i32s(&[50, 30, 90, 70]));
+    let (svg, _) = render(&input, false).unwrap();
+    assert!(svg.contains("viewBox=\"0 0 200."), "{svg}");
+    assert!(!svg.contains("viewBox=\"50 30 40 40\""), "{svg}");
 }
 
 #[test]
@@ -136,6 +155,26 @@ fn creates_selects_and_deletes_objects() {
     ]);
     let (svg, _) = render(&input, false).unwrap();
     assert!(svg.contains("stroke=\"#ff0000\""), "{svg}");
+}
+
+#[test]
+fn extended_pen_preserves_derived_cap_and_join() {
+    let mut pen = vec![0; 44];
+    pen[0..4].copy_from_slice(&1u32.to_le_bytes());
+    pen[20..24].copy_from_slice(&0x0001_1100u32.to_le_bytes());
+    pen[24..28].copy_from_slice(&5u32.to_le_bytes());
+    pen[28..32].copy_from_slice(&0u32.to_le_bytes());
+    pen[32..36].copy_from_slice(&0x0000_00ffu32.to_le_bytes());
+    let input = emf(&[
+        record(95, &pen),
+        record(37, &1u32.to_le_bytes()),
+        record(27, &i32s(&[0, 0])),
+        record(54, &i32s(&[10, 0])),
+    ]);
+    let (svg, diagnostics) = render(&input, false).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(svg.contains("stroke-linecap=\"square\""), "{svg}");
+    assert!(svg.contains("stroke-linejoin=\"bevel\""), "{svg}");
 }
 
 #[test]
@@ -217,6 +256,66 @@ fn renders_unicode_ext_text_out_with_dx() {
 }
 
 #[test]
+fn eto_pdy_preserves_horizontal_pair_advances_and_reports_vertical_limitation() {
+    let text: Vec<u8> = "ABC".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut payload = vec![0; 68];
+    payload[28..36].copy_from_slice(&i32s(&[10, 20]));
+    payload[36..40].copy_from_slice(&3u32.to_le_bytes());
+    payload[40..44].copy_from_slice(&76u32.to_le_bytes());
+    payload[44..48].copy_from_slice(&0x2000u32.to_le_bytes());
+    payload[64..68].copy_from_slice(&84u32.to_le_bytes());
+    payload.extend_from_slice(&text);
+    payload.extend_from_slice(&[0, 0]);
+    payload.extend_from_slice(&i32s(&[8, 100, 9, 200, 10, 300]));
+    let (svg, diagnostics) = render(&emf(&[record(84, &payload)]), false).unwrap();
+    assert!(svg.contains("<tspan x=\"27\" y=\"20\">C</tspan>"), "{svg}");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "pdy_approximate"));
+}
+
+#[test]
+fn renders_ansi_text_and_independent_opaque_clipped_options() {
+    let mut payload = vec![0; 68];
+    payload[28..36].copy_from_slice(&i32s(&[10, 20]));
+    payload[36..40].copy_from_slice(&1u32.to_le_bytes());
+    payload[40..44].copy_from_slice(&76u32.to_le_bytes());
+    payload[44..48].copy_from_slice(&6u32.to_le_bytes());
+    payload[48..64].copy_from_slice(&i32s(&[2, 3, 30, 40]));
+    payload[64..68].copy_from_slice(&80u32.to_le_bytes());
+    payload.extend_from_slice(&[0xe9, 0, 0, 0]);
+    payload.extend_from_slice(&8i32.to_le_bytes());
+    let (svg, diagnostics) = render(&emf(&[record(83, &payload)]), false).unwrap();
+    assert!(svg.contains('\u{e9}'), "{svg}");
+    assert!(svg.contains("<clipPath"), "{svg}");
+    assert!(svg.contains("fill=\"#ffffff\" stroke=\"none\""), "{svg}");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn arbitrary_affine_text_is_explicitly_approximate_or_strictly_rejected() {
+    let text: Vec<u8> = "A".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut payload = vec![0; 68];
+    payload[28..36].copy_from_slice(&i32s(&[10, 20]));
+    payload[36..40].copy_from_slice(&1u32.to_le_bytes());
+    payload[40..44].copy_from_slice(&76u32.to_le_bytes());
+    payload.extend_from_slice(&text);
+    payload.extend_from_slice(&[0, 0]);
+    let input = emf(&[
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(84, &payload),
+    ]);
+    let (_, diagnostics) = render(&input, false).unwrap();
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "affine_text_approximate"));
+    assert!(matches!(
+        render(&input, true),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
+}
+
+#[test]
 fn emf_plus_is_classified_and_not_rendered() {
     let mut comment = 4u32.to_le_bytes().to_vec();
     comment.extend_from_slice(b"EMF+");
@@ -227,6 +326,52 @@ fn emf_plus_is_classified_and_not_rendered() {
         render(&input, false),
         Err(MetafileError::UnsupportedCriticalFeature(_))
     ));
+}
+
+#[test]
+fn emf_plus_comment_validation_is_bounded_and_deterministic() {
+    let mut truncated = 16u32.to_le_bytes().to_vec();
+    truncated.extend_from_slice(b"EMF+");
+    let input = emf(&[record(70, &truncated)]);
+    assert!(matches!(
+        inspect(&input),
+        Err(MetafileError::TruncatedInput { .. })
+    ));
+
+    let short = emf(&[record(70, &0u32.to_le_bytes())]);
+    assert_eq!(inspect(&short).unwrap().format, MetafileFormat::Emf);
+
+    let mut comment = 4u32.to_le_bytes().to_vec();
+    comment.extend_from_slice(b"EMF+");
+    let valid = emf(&[record(70, &comment)]);
+    assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
+    assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
+
+    let mut options = RenderOptions::default();
+    options.limits.max_input_bytes = valid.len() - 1;
+    assert!(matches!(
+        inspect_with_options(&valid, &options),
+        Err(MetafileError::ResourceLimitExceeded {
+            resource: "input bytes",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn non_finite_world_transforms_are_rejected_but_identity_ignores_xform() {
+    let nan = f32::NAN;
+    let input = emf(&[record(35, &transform([nan, 0.0, 0.0, 1.0, 0.0, 0.0]))]);
+    assert!(matches!(
+        render(&input, false),
+        Err(MetafileError::InvalidHeader(_))
+    ));
+
+    let identity = emf(&[record(
+        36,
+        &modify_transform([nan, nan, nan, nan, nan, nan], 1),
+    )]);
+    assert!(render(&identity, false).is_ok());
 }
 
 #[test]
@@ -286,14 +431,9 @@ fn renders_set_pixel_and_negative_viewport_extent() {
 
 #[test]
 fn modify_world_transform_composes_and_can_reset() {
-    let transform = |values: [f32; 6], mode: u32| {
-        let mut payload: Vec<u8> = values.into_iter().flat_map(f32::to_le_bytes).collect();
-        payload.extend_from_slice(&mode.to_le_bytes());
-        payload
-    };
     let input = emf(&[
-        record(36, &transform([1.0, 0.0, 0.0, 1.0, 5.0, 0.0], 2)),
-        record(36, &transform([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], 2)),
+        record(36, &modify_transform([1.0, 0.0, 0.0, 1.0, 5.0, 0.0], 2)),
+        record(36, &modify_transform([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], 2)),
         record(27, &i32s(&[0, 0])),
         record(54, &i32s(&[10, 0])),
     ]);
@@ -344,7 +484,7 @@ fn non_overlapping_clips_remain_empty() {
         record(54, &i32s(&[50, 50])),
     ]);
     let (svg, _) = render(&input, false).unwrap();
-    assert!(svg.contains("width=\"0\" height=\"0\""), "{svg}");
+    assert!(svg.contains("<polygon points=\"\"/>"), "{svg}");
 }
 
 #[test]
@@ -367,7 +507,8 @@ fn renders_stretch_dibits_and_destination_mirroring() {
     payload.extend_from_slice(&[0, 0, 255, 0]);
     let (svg, _) = render(&emf(&[record(81, &payload)]), false).unwrap();
     assert!(
-        svg.contains("data:image/png;base64") && svg.contains("scale(-1 1)"),
+        svg.contains("data:image/png;base64")
+            && svg.contains("transform=\"matrix(-20 0 0 30 10 20)\""),
         "{svg}"
     );
 }
@@ -454,4 +595,177 @@ fn glyph_index_text_is_never_misdecoded() {
         render(&input, true),
         Err(MetafileError::UnsupportedCriticalFeature(_))
     ));
+}
+
+#[test]
+fn affine_rectangles_preserve_rotation_and_shear() {
+    let rotated = emf(&[
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(43, &i32s(&[0, 0, 10, 20])),
+    ]);
+    let (svg, _) = render(&rotated, false).unwrap();
+    assert!(svg.contains("M 0 0 L 0 10 L -20 10 L -20 0 Z"), "{svg}");
+    assert!(!svg.contains("<rect"), "{svg}");
+
+    let sheared = emf(&[
+        record(35, &transform([1.0, 0.0, 0.5, 1.0, 0.0, 0.0])),
+        record(43, &i32s(&[0, 0, 10, 20])),
+    ]);
+    let (svg, _) = render(&sheared, false).unwrap();
+    assert!(svg.contains("M 0 0 L 10 0 L 20 20 L 10 20 Z"), "{svg}");
+}
+
+#[test]
+fn affine_ellipses_transform_every_control_point() {
+    let rotated = emf(&[
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(42, &i32s(&[0, 0, 10, 20])),
+    ]);
+    let (svg, _) = render(&rotated, false).unwrap();
+    assert!(svg.contains("M -10 10 C -15.522847 10"), "{svg}");
+
+    let scaled_and_rotated = emf(&[
+        record(35, &transform([0.0, 2.0, -3.0, 0.0, 0.0, 0.0])),
+        record(42, &i32s(&[0, 0, 10, 20])),
+    ]);
+    let (svg, _) = render(&scaled_and_rotated, false).unwrap();
+    assert!(svg.contains("M -30 20 C -46.568542 20"), "{svg}");
+}
+
+#[test]
+fn affine_arcs_pies_and_chords_are_renderer_neutral_paths() {
+    let mut arc = i32s(&[0, 0, 100, 50]);
+    arc.extend_from_slice(&i32s(&[100, 25, 50, 50]));
+    let input = emf(&[
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(45, &arc),
+        record(46, &arc),
+        record(47, &arc),
+    ]);
+    let (svg, _) = render(&input, false).unwrap();
+    assert!(svg.contains("M -25 100 C"), "{svg}");
+    assert!(svg.matches(" Z\"").count() >= 2, "{svg}");
+    assert!(!svg.contains(" A "), "{svg}");
+}
+
+#[test]
+fn negative_mapping_and_world_transform_compose_without_box_collapse() {
+    let input = emf(&[
+        record(11, &i32s(&[-2, 3])),
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(43, &i32s(&[0, 0, 10, 20])),
+    ]);
+    let (svg, _) = render(&input, false).unwrap();
+    assert!(svg.contains("M 0 0 L 0 30 L 40 30 L 40 0 Z"), "{svg}");
+}
+
+#[test]
+fn modify_world_transform_left_and_right_orders_differ() {
+    let records = |mode| {
+        vec![
+            record(35, &transform([1.0, 0.0, 0.0, 1.0, 10.0, 0.0])),
+            record(36, &modify_transform([2.0, 0.0, 0.0, 2.0, 0.0, 0.0], mode)),
+            record(27, &i32s(&[0, 0])),
+            record(54, &i32s(&[1, 0])),
+        ]
+    };
+    let (left, _) = render(&emf(&records(2)), false).unwrap();
+    let (right, _) = render(&emf(&records(3)), false).unwrap();
+    assert!(left.contains("M 10 0 L 12 0"), "{left}");
+    assert!(right.contains("M 20 0 L 22 0"), "{right}");
+}
+
+#[test]
+fn transformed_clip_is_polygonal_and_survives_save_restore() {
+    let input = emf(&[
+        record(35, &transform([0.0, 1.0, -1.0, 0.0, 0.0, 0.0])),
+        record(30, &i32s(&[0, 0, 10, 20])),
+        record(33, &[]),
+        record(30, &i32s(&[0, 0, 5, 5])),
+        record(34, &(-1i32).to_le_bytes()),
+        record(27, &i32s(&[0, 0])),
+        record(54, &i32s(&[30, 30])),
+    ]);
+    let (svg, _) = render(&input, false).unwrap();
+    assert!(
+        svg.contains("<polygon points=\"0,0 0,10 -20,10 -20,0\"/>"),
+        "{svg}"
+    );
+}
+
+#[test]
+fn completed_paths_can_become_deterministic_clips() {
+    let input = emf(&[
+        record(59, &[]),
+        record(27, &i32s(&[0, 0])),
+        record(54, &i32s(&[20, 0])),
+        record(54, &i32s(&[20, 20])),
+        record(61, &[]),
+        record(60, &[]),
+        record(67, &5u32.to_le_bytes()),
+        record(27, &i32s(&[0, 10])),
+        record(54, &i32s(&[30, 10])),
+    ]);
+    let (first, diagnostics) = render(&input, false).unwrap();
+    let (second, _) = render(&input, false).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(
+        first.contains(
+            "<clipPath id=\"clip0\"><path d=\"M 0 0 L 20 0 L 20 20 Z\" clip-rule=\"evenodd\"/>"
+        ),
+        "{first}"
+    );
+    assert_eq!(first, second);
+}
+
+#[test]
+fn path_and_rectangular_clips_intersect_deterministically() {
+    let input = emf(&[
+        record(30, &i32s(&[0, 0, 30, 30])),
+        record(59, &[]),
+        record(27, &i32s(&[5, 5])),
+        record(54, &i32s(&[25, 5])),
+        record(54, &i32s(&[25, 25])),
+        record(61, &[]),
+        record(60, &[]),
+        record(67, &1u32.to_le_bytes()),
+        record(27, &i32s(&[0, 10])),
+        record(54, &i32s(&[30, 10])),
+    ]);
+    let (svg, diagnostics) = render(&input, false).unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(svg.contains("<clipPath id=\"clip0\"><polygon"), "{svg}");
+    assert!(
+        svg.contains("<clipPath id=\"clip1\"><g clip-path=\"url(#clip0)\"><path"),
+        "{svg}"
+    );
+}
+
+#[test]
+fn transformed_bitmap_uses_full_affine_placement() {
+    let mut payload = vec![0; 72];
+    payload[16..48].copy_from_slice(&i32s(&[10, 20, 0, 0, 1, 1, 80, 40]));
+    payload[40..44].copy_from_slice(&80u32.to_le_bytes());
+    payload[44..48].copy_from_slice(&40u32.to_le_bytes());
+    payload[48..52].copy_from_slice(&120u32.to_le_bytes());
+    payload[52..56].copy_from_slice(&4u32.to_le_bytes());
+    payload[60..64].copy_from_slice(&0x00cc_0020u32.to_le_bytes());
+    payload[64..72].copy_from_slice(&i32s(&[20, 30]));
+    let mut bmi = vec![0; 40];
+    bmi[0..4].copy_from_slice(&40u32.to_le_bytes());
+    bmi[4..8].copy_from_slice(&1i32.to_le_bytes());
+    bmi[8..12].copy_from_slice(&1i32.to_le_bytes());
+    bmi[12..14].copy_from_slice(&1u16.to_le_bytes());
+    bmi[14..16].copy_from_slice(&24u16.to_le_bytes());
+    payload.extend_from_slice(&bmi);
+    payload.extend_from_slice(&[0, 0, 255, 0]);
+    let input = emf(&[
+        record(35, &transform([1.0, 0.5, 0.25, 1.0, 3.0, 4.0])),
+        record(81, &payload),
+    ]);
+    let (svg, _) = render(&input, false).unwrap();
+    assert!(
+        svg.contains("transform=\"matrix(20 10 7.5 30 18 29)\""),
+        "{svg}"
+    );
 }

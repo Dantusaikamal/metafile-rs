@@ -13,4 +13,7 @@ pwsh tools/windows-reference/reference.ps1 -Action render -Path fixtures/real-wo
 The generator adds a project-owned Aldus placeable header around the standard
 WMF bytes emitted by GDI. The generator also creates project-owned EMF and EMF+
 Dual samples through GDI+ for future-format corpus/classification coverage.
-The Rust engine does not parse or render either format in 0.1.0.
+The harness is a Windows-only .NET 8 project using the Windows Desktop
+`System.Drawing.Common` framework. It is qualification tooling only and is
+not a Rust runtime dependency. The engine renders ordinary EMF; EMF+ remains
+classification/inspection-only and is explicitly rejected for playback.

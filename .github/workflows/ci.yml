@@ -59,7 +59,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
       - uses: browser-actions/setup-chrome@v1
+      - shell: pwsh
+        run: dotnet build tools/windows-reference/MetafileReference.csproj --configuration Release
       - shell: pwsh
         run: ./scripts/windows-qualification.ps1
       - if: always()
