@@ -3,8 +3,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{
     ArcKind, Bitmap, BitmapSampling, Brush, BrushStyle, Color, HorizontalTextAlignment,
-    MetafileError, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result, TextRun,
-    VerticalTextAlignment,
+    MetafileError, Path, PathSegment, Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result,
+    TextRun, VerticalTextAlignment,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -205,10 +205,9 @@ impl Renderer for SvgRenderer {
             return Ok(());
         }
         let clip = self.clip_attr(clip);
-        let rule = if fill_mode == 2 { "nonzero" } else { "evenodd" };
         self.push(
             format!(
-                "<polygon points=\"{}\" {} fill-rule=\"{rule}\"{clip}/>",
+                "<polygon points=\"{}\" {}{clip}/>",
                 point_list(points),
                 paint(pen, brush, fill_mode)
             ),
@@ -247,6 +246,82 @@ impl Renderer for SvgRenderer {
                 paint(pen, brush, fill_mode)
             ),
             stroke_bounds(points_bounds(&points), pen),
+        )
+    }
+    fn path(
+        &mut self,
+        path: &Path,
+        pen: &Pen,
+        brush: &Brush,
+        fill_mode: u16,
+        stroke: bool,
+        fill: bool,
+        clip: Option<Rect>,
+    ) -> Result<()> {
+        let mut data = String::new();
+        let mut points = Vec::new();
+        for figure in &path.figures {
+            write!(data, "M {} {}", n(figure.start.x), n(figure.start.y))
+                .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+            points.push(figure.start);
+            for segment in &figure.segments {
+                match *segment {
+                    PathSegment::Line(to) => {
+                        write!(data, " L {} {}", n(to.x), n(to.y))
+                            .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+                        points.push(to);
+                    }
+                    PathSegment::Cubic {
+                        control1,
+                        control2,
+                        to,
+                    } => {
+                        write!(
+                            data,
+                            " C {} {} {} {} {} {}",
+                            n(control1.x),
+                            n(control1.y),
+                            n(control2.x),
+                            n(control2.y),
+                            n(to.x),
+                            n(to.y)
+                        )
+                        .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+                        points.extend([control1, control2, to]);
+                    }
+                }
+            }
+            if figure.closed {
+                data.push_str(" Z");
+            }
+        }
+        if points.is_empty() {
+            return Ok(());
+        }
+        let actual_pen = if stroke {
+            pen.clone()
+        } else {
+            Pen {
+                style: PenStyle::Null,
+                ..pen.clone()
+            }
+        };
+        let actual_brush = if fill {
+            brush.clone()
+        } else {
+            Brush {
+                style: BrushStyle::Null,
+                ..brush.clone()
+            }
+        };
+        let clip = self.clip_attr(clip);
+        self.push(
+            format!(
+                "<path d=\"{}\" {}{clip}/>",
+                data.trim(),
+                paint(&actual_pen, &actual_brush, fill_mode)
+            ),
+            stroke_bounds(points_bounds(&points), &actual_pen),
         )
     }
     fn rectangle(
@@ -697,5 +772,33 @@ mod tests {
             ),
             "{svg}"
         );
+    }
+
+    #[test]
+    fn generic_path_serializes_cubic_and_close() {
+        let mut renderer = SvgRenderer::new(ResourceLimits::default());
+        renderer
+            .path(
+                &Path {
+                    figures: vec![metafile_core::PathFigure {
+                        start: Point::new(1.0, 2.0),
+                        segments: vec![PathSegment::Cubic {
+                            control1: Point::new(3.0, 4.0),
+                            control2: Point::new(5.0, 6.0),
+                            to: Point::new(7.0, 8.0),
+                        }],
+                        closed: true,
+                    }],
+                },
+                &Pen::default(),
+                &Brush::default(),
+                1,
+                true,
+                true,
+                None,
+            )
+            .unwrap();
+        let svg = renderer.finish(None, None).unwrap();
+        assert!(svg.contains("d=\"M 1 2 C 3 4 5 6 7 8 Z\""), "{svg}");
     }
 }

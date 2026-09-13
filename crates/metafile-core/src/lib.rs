@@ -151,7 +151,7 @@ pub struct Diagnostic {
     pub code: String,
     pub message: String,
     pub record_index: Option<u32>,
-    pub record_type: Option<u16>,
+    pub record_type: Option<u32>,
     pub record_name: Option<String>,
     pub offset: Option<usize>,
     pub occurrences: u32,
@@ -172,7 +172,7 @@ impl Diagnostic {
         }
     }
     #[must_use]
-    pub fn at_record(mut self, index: usize, record_type: u16, name: &str, offset: usize) -> Self {
+    pub fn at_record(mut self, index: usize, record_type: u32, name: &str, offset: usize) -> Self {
         self.record_index = Some(index as u32);
         self.record_type = Some(record_type);
         self.record_name = Some(name.into());
@@ -259,9 +259,9 @@ pub enum MetafileError {
         limit: u64,
     },
     #[error("invalid object handle {handle} at record {record_index}")]
-    InvalidObjectHandle { handle: u16, record_index: usize },
+    InvalidObjectHandle { handle: u32, record_index: usize },
     #[error("object handle {handle} is selected and cannot be deleted at record {record_index}")]
-    ObjectInUse { handle: u16, record_index: usize },
+    ObjectInUse { handle: u32, record_index: usize },
     #[error(
         "invalid RestoreDC value {value} at record {record_index} with stack depth {stack_depth}"
     )]
@@ -384,6 +384,70 @@ pub struct Mapping {
     pub viewport_origin: Point,
     pub viewport_extent: Point,
 }
+
+/// A format-neutral GDI affine world transform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform {
+    pub m11: f64,
+    pub m12: f64,
+    pub m21: f64,
+    pub m22: f64,
+    pub dx: f64,
+    pub dy: f64,
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Transform {
+    pub const IDENTITY: Self = Self {
+        m11: 1.0,
+        m12: 0.0,
+        m21: 0.0,
+        m22: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
+
+    #[must_use]
+    pub fn transform_point(self, point: Point) -> Point {
+        Point::new(
+            point.x * self.m11 + point.y * self.m21 + self.dx,
+            point.x * self.m12 + point.y * self.m22 + self.dy,
+        )
+    }
+
+    #[must_use]
+    pub fn transform_vector(self, vector: Vector) -> Vector {
+        Vector::new(
+            vector.x * self.m11 + vector.y * self.m21,
+            vector.x * self.m12 + vector.y * self.m22,
+        )
+    }
+
+    /// Returns the transform which applies `other` and then `self`.
+    #[must_use]
+    pub fn compose(self, other: Self) -> Self {
+        Self {
+            m11: other.m11 * self.m11 + other.m12 * self.m21,
+            m12: other.m11 * self.m12 + other.m12 * self.m22,
+            m21: other.m21 * self.m11 + other.m22 * self.m21,
+            m22: other.m21 * self.m12 + other.m22 * self.m22,
+            dx: other.dx * self.m11 + other.dy * self.m21 + self.dx,
+            dy: other.dx * self.m12 + other.dy * self.m22 + self.dy,
+        }
+    }
+
+    #[must_use]
+    pub fn is_finite(self) -> bool {
+        [self.m11, self.m12, self.m21, self.m22, self.dx, self.dy]
+            .iter()
+            .all(|value| value.is_finite())
+    }
+}
 impl Default for Mapping {
     fn default() -> Self {
         Self {
@@ -464,6 +528,7 @@ pub struct DeviceContext {
     pub stretch_mode: u16,
     pub mapper_flags: u32,
     pub mapping: Mapping,
+    pub world_transform: Transform,
     pub clip: Option<Rect>,
     pub selected_pen: Option<u16>,
     pub selected_brush: Option<u16>,
@@ -486,6 +551,7 @@ impl Default for DeviceContext {
             stretch_mode: 1,
             mapper_flags: 0,
             mapping: Mapping::default(),
+            world_transform: Transform::default(),
             clip: None,
             selected_pen: None,
             selected_brush: None,
@@ -536,6 +602,28 @@ pub enum BitmapSampling {
     Smooth,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    pub figures: Vec<PathFigure>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathFigure {
+    pub start: Point,
+    pub segments: Vec<PathSegment>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PathSegment {
+    Line(Point),
+    Cubic {
+        control1: Point,
+        control2: Point,
+        to: Point,
+    },
+}
+
 pub trait Renderer {
     fn drawing_bounds(&self) -> Option<Rect>;
     fn line(&mut self, from: Point, to: Point, pen: &Pen, clip: Option<Rect>) -> Result<()>;
@@ -554,6 +642,16 @@ pub trait Renderer {
         pen: &Pen,
         brush: &Brush,
         fill_mode: u16,
+        clip: Option<Rect>,
+    ) -> Result<()>;
+    fn path(
+        &mut self,
+        path: &Path,
+        pen: &Pen,
+        brush: &Brush,
+        fill_mode: u16,
+        stroke: bool,
+        fill: bool,
         clip: Option<Rect>,
     ) -> Result<()>;
     fn rectangle(
@@ -647,5 +745,29 @@ mod tests {
                 bottom: 30.0
             })
             .is_none());
+    }
+
+    #[test]
+    fn affine_composition_and_vector_translation_are_correct() {
+        let translate = Transform {
+            dx: 5.0,
+            dy: 7.0,
+            ..Transform::IDENTITY
+        };
+        let scale = Transform {
+            m11: 2.0,
+            m22: 3.0,
+            ..Transform::IDENTITY
+        };
+        assert_eq!(
+            translate
+                .compose(scale)
+                .transform_point(Point::new(1.0, 1.0)),
+            Point::new(7.0, 10.0)
+        );
+        assert_eq!(
+            translate.transform_vector(Vector::new(2.0, 3.0)),
+            Vector::new(2.0, 3.0)
+        );
     }
 }

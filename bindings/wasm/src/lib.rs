@@ -10,7 +10,7 @@ struct ErrorPayload {
     message: String,
     offset: Option<usize>,
     record_index: Option<usize>,
-    record_type: Option<u16>,
+    record_type: Option<u32>,
 }
 fn js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(value)
@@ -72,10 +72,20 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
 }
 #[wasm_bindgen(js_name = inspectWmf)]
 pub fn inspect_wmf(bytes: &[u8]) -> Result<JsValue, JsValue> {
-    inspect(bytes).map_err(error).and_then(|v| js(&v))
+    inspect_metafile(bytes)
 }
 #[wasm_bindgen(js_name = wmfToSvg)]
 pub fn wmf_to_svg(bytes: &[u8], options: Option<JsValue>) -> Result<JsValue, JsValue> {
+    metafile_to_svg(bytes, options)
+}
+
+#[wasm_bindgen(js_name = inspectMetafile)]
+pub fn inspect_metafile(bytes: &[u8]) -> Result<JsValue, JsValue> {
+    inspect(bytes).map_err(error).and_then(|v| js(&v))
+}
+
+#[wasm_bindgen(js_name = metafileToSvg)]
+pub fn metafile_to_svg(bytes: &[u8], options: Option<JsValue>) -> Result<JsValue, JsValue> {
     let options = options.map_or_else(
         || Ok(RenderOptions::default()),
         |v| {

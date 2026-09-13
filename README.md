@@ -5,8 +5,9 @@ Metafiles and rendering deterministic, self-contained SVG. It targets native
 Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
 converters, browser Canvas, or remote services.
 
-This release establishes substantial WMF support. It is not a claim of complete
-WMF compatibility. EMF and EMF+ are roadmap formats and are not implemented.
+This release establishes substantial WMF support and an initial ordinary-EMF
+engine. It is not a claim of complete Windows GDI compatibility. EMF+ is
+detected but its playback remains a roadmap feature.
 
 ## Rust API
 
@@ -18,7 +19,7 @@ std::fs::write("drawing.svg", result.svg)?;
 ```
 
 `RenderResult` includes SVG, format-neutral `MetafileInfo` (with nested
-`FormatSpecificInfo::Wmf` details), and non-fatal diagnostics.
+`FormatSpecificInfo::Wmf` or `FormatSpecificInfo::Emf` details), and non-fatal diagnostics.
 `RenderOptions` provides strict mode and configurable resource limits. Lower
 level consumers can call `metafile_wmf::playback` with any
 `metafile_core::Renderer` without depending on the SVG backend.
@@ -41,7 +42,8 @@ level consumers can call `metafile_wmf::playback` with any
 | Other bitmap transfers/compression | Diagnostic-only | Safely skipped in permissive mode and rejected in strict mode. |
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
-| EMF / EMF+ | Unsupported | Roadmap formats; they are not detected or parsed by this release. |
+| Ordinary EMF | Partial | Validated headers, world/mapping transforms, objects/DC state, common vectors and paths, Unicode text, rectangular clips, and BI_RGB StretchDIBits are rendered. See `docs/emf-record-audit.md`. |
+| EMF+ | Classified, playback unsupported | Embedded EMF+ comments produce `MetafileFormat::EmfPlus`; playback fails explicitly instead of ignoring the stream. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
 permissive mode. In strict mode, an unknown operation or a known operation
@@ -60,7 +62,7 @@ evidence of pixel-perfect Windows GDI equivalence.
 ## Architecture
 
 ```text
-metafile-wmf parser -> stateful GDI playback -> metafile-core Renderer events
+metafile-wmf / metafile-emf -> stateful GDI playback -> metafile-core Renderer events
 metafile-svg -----------------------------------------------> SVG
 metafile facade composes playback + SVG rendering
 bindings/wasm: Uint8Array/bytes -> structured metadata/render result
@@ -78,8 +80,9 @@ input returns typed errors and the workspace forbids unsafe Rust.
 
 ## WebAssembly
 
-`metafile-wasm` exposes `inspectWmf(Uint8Array)` and
-`wmfToSvg(Uint8Array, options?)`. The generated wasm-bindgen loader is
+`metafile-wasm` exposes format-neutral `inspectMetafile(Uint8Array)` and
+`metafileToSvg(Uint8Array, options?)`; `inspectWmf` and `wmfToSvg` remain
+compatibility aliases. The generated wasm-bindgen loader is
 responsible for initialization; the engine itself performs no fetch, filesystem,
 DOM, Canvas, or Node operations. No npm package is included yet.
 

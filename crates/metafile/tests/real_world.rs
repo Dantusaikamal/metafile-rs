@@ -48,9 +48,11 @@ fn committed_corpus_matches_declared_support_contract() {
             assert!(first.svg.contains("<svg"));
             assert!(first.svg.contains("</svg>"));
         } else {
+            let info = metafile::inspect(&bytes).expect("inspect unsupported playback fixture");
+            assert_eq!(info.format, metafile_core::MetafileFormat::EmfPlus);
             assert!(matches!(
-                metafile::inspect(&bytes),
-                Err(metafile_core::MetafileError::UnsupportedFormat)
+                metafile::to_svg(&bytes, Default::default()),
+                Err(metafile_core::MetafileError::UnsupportedCriticalFeature(_))
             ));
         }
     }

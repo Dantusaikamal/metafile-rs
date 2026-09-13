@@ -13,16 +13,20 @@ const browser = browserCandidates.find((path) => existsSync(path) || !path.inclu
 if (!browser) throw new Error('Chrome/Chromium/Edge not found; set METAFILE_BROWSER');
 
 const page = `<!doctype html><meta charset="utf-8"><body>RUNNING<script type="module">
-import init, { inspectWmf, wmfToSvg } from '/wasm/metafile_wasm.js';
+import init, { inspectMetafile, inspectWmf, metafileToSvg, wmfToSvg } from '/wasm/metafile_wasm.js';
 try {
   await init('/wasm/metafile_wasm_bg.wasm');
   const bytes = new Uint8Array(await (await fetch('/fixture.wmf')).arrayBuffer());
   const info = inspectWmf(bytes);
   const first = wmfToSvg(bytes, { strict: false });
   const second = wmfToSvg(bytes, { strict: false });
+  const emf = new Uint8Array(await (await fetch('/fixture.emf')).arrayBuffer());
+  const emfInfo = inspectMetafile(emf);
+  const emfFirst = metafileToSvg(emf, { strict: false });
+  const emfSecond = metafileToSvg(emf, { strict: false });
   let structured = false;
-  try { inspectWmf(new Uint8Array([1, 2, 3])); } catch (error) { structured = typeof error?.code === 'string' && typeof error?.message === 'string'; }
-  if (info.format !== 'wmf' || !first.svg.includes('<svg') || first.svg !== second.svg || !structured) throw new Error('contract assertion failed');
+  try { inspectMetafile(new Uint8Array([1, 2, 3])); } catch (error) { structured = typeof error?.code === 'string' && typeof error?.message === 'string'; }
+  if (info.format !== 'wmf' || !first.svg.includes('<svg') || first.svg !== second.svg || emfInfo.format !== 'emf' || !emfFirst.svg.includes('<svg') || emfFirst.svg !== emfSecond.svg || !structured) throw new Error('contract assertion failed');
   document.body.textContent = 'PASS';
 } catch (error) { document.body.textContent = 'FAIL: ' + (error?.stack || error); }
 </script>`;
@@ -32,6 +36,7 @@ const server = createServer((request, response) => {
     '/wasm/metafile_wasm.js': ['target/wasm-bindgen-web/metafile_wasm.js', 'text/javascript'],
     '/wasm/metafile_wasm_bg.wasm': ['target/wasm-bindgen-web/metafile_wasm_bg.wasm', 'application/wasm'],
     '/fixture.wmf': ['fixtures/real-world/windows-gdi-vector.wmf', 'application/octet-stream'],
+    '/fixture.emf': ['fixtures/real-world/windows-gdiplus-emf.emf', 'application/octet-stream'],
   };
   if (request.url === '/') { response.setHeader('content-type', 'text/html'); response.end(page); return; }
   const route = routes[request.url];

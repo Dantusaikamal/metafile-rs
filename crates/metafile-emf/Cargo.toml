@@ -1,6 +1,6 @@
 [package]
-name = "metafile-wmf"
-description = "First-party safe WMF parser, inspection, and renderer-independent playback engine"
+name = "metafile-emf"
+description = "First-party safe EMF parser, inspection, and renderer-independent playback engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

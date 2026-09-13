@@ -134,6 +134,7 @@ name = "metafile"
 version = "0.1.0"
 dependencies = [
  "metafile-core",
+ "metafile-emf",
  "metafile-svg",
  "metafile-wmf",
  "serde",
@@ -146,6 +147,24 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "metafile-dib"
+version = "0.1.0"
+dependencies = [
+ "metafile-core",
+]
+
+[[package]]
+name = "metafile-emf"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "metafile-core",
+ "metafile-dib",
+ "metafile-svg",
+ "serde",
 ]
 
 [[package]]
@@ -183,6 +202,7 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "metafile-core",
+ "metafile-dib",
  "metafile-svg",
  "serde",
 ]

@@ -8,6 +8,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 metafile-wmf = { path = "../crates/metafile-wmf" }
+metafile-emf = { path = "../crates/metafile-emf" }
 metafile = { path = "../crates/metafile" }
 metafile-core = { path = "../crates/metafile-core" }
 [[bin]]

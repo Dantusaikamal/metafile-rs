@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import init, { inspectWmf, wmfToSvg } from "../target/wasm-bindgen-web/metafile_wasm.js";
+import init, { inspectMetafile, inspectWmf, metafileToSvg, wmfToSvg } from "../target/wasm-bindgen-web/metafile_wasm.js";
 
 const u16 = (v) => [v & 255, (v >>> 8) & 255];
 const u32 = (v) => [v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255];
@@ -32,8 +32,14 @@ for (const bytes of [standard(), placeable()]) {
   if (first.svg !== second.svg) throw new Error("rendering is not deterministic");
 }
 
+const emf = new Uint8Array(await readFile(new URL("../fixtures/real-world/windows-gdiplus-emf.emf", import.meta.url)));
+const emfInfo = inspectMetafile(emf);
+const emfFirst = metafileToSvg(emf, { strict: false });
+const emfSecond = metafileToSvg(emf, { strict: false });
+if (emfInfo.format !== "emf" || !emfFirst.svg.includes("<svg") || emfFirst.svg !== emfSecond.svg) throw new Error("EMF render failed");
+
 try {
-  inspectWmf(new Uint8Array([1, 2, 3]));
+  inspectMetafile(new Uint8Array([1, 2, 3]));
   throw new Error("malformed input unexpectedly succeeded");
 } catch (error) {
   if (!error || typeof error.code !== "string" || typeof error.message !== "string") throw new Error("error was not structured");

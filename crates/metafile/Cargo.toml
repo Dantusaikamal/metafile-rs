@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+metafile-emf = { path = "../metafile-emf" }
 metafile-core = { path = "../metafile-core" }
 metafile-svg = { path = "../metafile-svg" }
 metafile-wmf = { path = "../metafile-wmf" }

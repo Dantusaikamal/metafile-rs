@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -58,6 +59,11 @@ public static class MetafileReference
         GenerateBitmap(Path.Combine(directory, "windows-gdi-bitmap.wmf"));
         GenerateLargeVector(Path.Combine(directory, "windows-gdi-large-vector.wmf"));
         GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emf.emf"), EmfType.EmfOnly);
+        GenerateEnhancedMapping(Path.Combine(directory, "windows-emf-mapping.emf"));
+        GenerateEnhancedText(Path.Combine(directory, "windows-emf-text.emf"));
+        GenerateEnhancedPaths(Path.Combine(directory, "windows-emf-paths.emf"));
+        GenerateEnhancedBitmap(Path.Combine(directory, "windows-emf-bitmap.emf"));
+        GenerateEnhancedState(Path.Combine(directory, "windows-emf-state.emf"));
         GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus.emf"), EmfType.EmfPlusDual);
     }
 
@@ -165,6 +171,90 @@ public static class MetafileReference
                 }
             } finally { referenceGraphics.ReleaseHdc(hdc); }
         }
+    }
+
+    static void WithEnhanced(string path, Action<Graphics> draw)
+    {
+        using (var reference = new Bitmap(1, 1))
+        using (var referenceGraphics = Graphics.FromImage(reference))
+        using (var stream = File.Create(path))
+        {
+            IntPtr hdc = referenceGraphics.GetHdc();
+            try {
+                using (var metafile = new Metafile(stream, hdc, new RectangleF(0, 0, 600, 400), MetafileFrameUnit.Pixel, EmfType.EmfOnly))
+                using (var graphics = Graphics.FromImage(metafile)) draw(graphics);
+            }
+            finally { referenceGraphics.ReleaseHdc(hdc); }
+        }
+    }
+
+    static void GenerateEnhancedMapping(string path)
+    {
+        WithEnhanced(path, graphics => {
+            graphics.TranslateTransform(80, 40);
+            graphics.ScaleTransform(1.5f, 0.75f);
+            graphics.RotateTransform(12);
+            using (var pen = new System.Drawing.Pen(Color.DarkGreen, 4)) {
+                graphics.DrawRectangle(pen, 20, 30, 220, 130);
+                graphics.DrawLine(pen, 0, 0, 280, 200);
+            }
+        });
+    }
+
+    static void GenerateEnhancedText(string path)
+    {
+        WithEnhanced(path, graphics => {
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+            using (var font = new System.Drawing.Font("Arial", 24, FontStyle.Bold | FontStyle.Italic)) {
+                graphics.DrawString("Unicode Ω Ж 日本", font, Brushes.Navy, 35, 55);
+                graphics.DrawString("Aligned text", font, Brushes.DarkRed, new RectangleF(250, 180, 300, 100), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+            }
+        });
+    }
+
+    static void GenerateEnhancedPaths(string path)
+    {
+        WithEnhanced(path, graphics => {
+            using (var pathShape = new GraphicsPath())
+            using (var pen = new System.Drawing.Pen(Color.Purple, 5))
+            using (var brush = new SolidBrush(Color.FromArgb(255, 230, 180, 40))) {
+                pathShape.StartFigure();
+                pathShape.AddBezier(40, 260, 130, 20, 330, 20, 410, 260);
+                pathShape.AddLine(410, 260, 40, 260);
+                pathShape.CloseFigure();
+                graphics.FillPath(brush, pathShape);
+                graphics.DrawPath(pen, pathShape);
+            }
+        });
+    }
+
+    static void GenerateEnhancedBitmap(string path)
+    {
+        using (var source = new Bitmap(3, 2, PixelFormat.Format24bppRgb)) {
+            source.SetPixel(0, 0, Color.Red); source.SetPixel(1, 0, Color.Green); source.SetPixel(2, 0, Color.Blue);
+            source.SetPixel(0, 1, Color.Cyan); source.SetPixel(1, 1, Color.Magenta); source.SetPixel(2, 1, Color.Yellow);
+            WithEnhanced(path, graphics => {
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                graphics.DrawImage(source, new System.Drawing.Rectangle(40, 40, 240, 160));
+                graphics.DrawImage(source, new System.Drawing.Rectangle(540, 230, -240, 130));
+            });
+        }
+    }
+
+    static void GenerateEnhancedState(string path)
+    {
+        WithEnhanced(path, graphics => {
+            using (var blue = new System.Drawing.Pen(Color.Blue, 3))
+            using (var red = new System.Drawing.Pen(Color.Red, 8)) {
+                graphics.DrawLine(blue, 20, 40, 560, 40);
+                GraphicsState saved = graphics.Save();
+                graphics.TranslateTransform(70, 100);
+                graphics.SetClip(new System.Drawing.Rectangle(0, 0, 300, 140));
+                graphics.DrawEllipse(red, 0, 0, 420, 180);
+                graphics.Restore(saved);
+                graphics.DrawRectangle(blue, 40, 260, 500, 90);
+            }
+        });
     }
 
     static void GenerateLargeVector(string path)

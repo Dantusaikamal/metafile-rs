@@ -1,6 +1,5 @@
 //! Safe, first-party WMF parsing, inspection, and renderer-independent playback.
 
-mod dib;
 mod reader;
 mod record;
 
@@ -11,6 +10,7 @@ use metafile_core::{
     HorizontalTextAlignment, MetafileError, MetafileFormat, Pen, PenStyle, Point, Rect, Renderer,
     ResourceLimits, Result, VerticalTextAlignment,
 };
+use metafile_dib::{crop_bitmap, decode_dib};
 use reader::Reader;
 use record::*;
 use serde::{Deserialize, Serialize};
@@ -734,7 +734,7 @@ impl Player {
     fn select(&mut self, h: u16, index: usize) -> Result<()> {
         if h & 0x8000 != 0 {
             let object = stock_object(h & 0x7fff).ok_or(MetafileError::InvalidObjectHandle {
-                handle: h,
+                handle: u32::from(h),
                 record_index: index,
             })?;
             self.apply_selected(h, object);
@@ -745,7 +745,7 @@ impl Player {
             .get(usize::from(h))
             .and_then(Clone::clone)
             .ok_or(MetafileError::InvalidObjectHandle {
-                handle: h,
+                handle: u32::from(h),
                 record_index: index,
             })?;
         self.apply_selected(h, o);
@@ -783,7 +783,7 @@ impl Player {
         if selected(&self.dc) || self.stack.iter().any(selected) {
             if strict {
                 return Err(MetafileError::ObjectInUse {
-                    handle: h,
+                    handle: u32::from(h),
                     record_index: index,
                 });
             }
@@ -799,12 +799,12 @@ impl Player {
             self.objects
                 .get_mut(usize::from(h))
                 .ok_or(MetafileError::InvalidObjectHandle {
-                    handle: h,
+                    handle: u32::from(h),
                     record_index: index,
                 })?;
         if slot.is_none() {
             return Err(MetafileError::InvalidObjectHandle {
-                handle: h,
+                handle: u32::from(h),
                 record_index: index,
             });
         }
@@ -848,7 +848,7 @@ impl Player {
         *count += 1;
         if let Some(existing) = d
             .iter_mut()
-            .find(|x| x.code == code && x.record_type == Some(e.function))
+            .find(|x| x.code == code && x.record_type == Some(u32::from(e.function)))
         {
             existing.occurrences = *count;
             return;
@@ -856,7 +856,7 @@ impl Player {
         if d.len() < self.limits.max_diagnostics {
             d.push(Diagnostic::warning(code, msg).at_record(
                 e.index,
-                e.function,
+                u32::from(e.function),
                 name(e.function),
                 e.offset,
             ));
@@ -916,15 +916,15 @@ impl Player {
             )?;
             return Ok(());
         }
-        match dib::decode_dib(dib, e.index, &self.limits) {
+        match decode_dib(dib, e.index, &self.limits) {
             Ok(decoded) => {
                 let bitmap = crop_bitmap(
                     decoded.bitmap,
                     decoded.top_down,
-                    src_x,
-                    src_y,
-                    src_w,
-                    src_h,
+                    i32::from(src_x),
+                    i32::from(src_y),
+                    i32::from(src_w),
+                    i32::from(src_h),
                     e.index,
                 )?;
                 let mapped_dest = self.map_rect(Rect {
@@ -1050,94 +1050,6 @@ impl Player {
         self.dc.mapping.viewport_extent.y =
             magnitude.copysign(sy) * self.dc.mapping.window_extent.y;
     }
-}
-
-fn crop_bitmap(
-    bitmap: metafile_core::Bitmap,
-    top_down: bool,
-    x: i16,
-    y: i16,
-    width: i16,
-    height: i16,
-    record_index: usize,
-) -> Result<metafile_core::Bitmap> {
-    let bad = |message: &str| MetafileError::InvalidBitmap {
-        record_index,
-        message: message.into(),
-    };
-    if width == 0 || height == 0 {
-        return Err(bad("source crop has a zero extent"));
-    }
-    let interval = |origin: i16, extent: i16, maximum: u32| -> Result<(u32, u32, bool)> {
-        let origin = i32::from(origin);
-        let end = origin
-            .checked_add(i32::from(extent))
-            .ok_or_else(|| bad("source crop overflow"))?;
-        let start = origin.min(end);
-        let finish = origin.max(end);
-        if start < 0 || finish > i32::try_from(maximum).unwrap_or(i32::MAX) {
-            return Err(bad("source crop lies outside bitmap"));
-        }
-        Ok((
-            u32::try_from(start).map_err(|_| bad("source crop overflow"))?,
-            u32::try_from(finish).map_err(|_| bad("source crop overflow"))?,
-            extent < 0,
-        ))
-    };
-    let (left, right, flip_x) = interval(x, width, bitmap.width)?;
-    let (native_top, native_bottom, flip_y) = interval(y, height, bitmap.height)?;
-    let (top, bottom) = if top_down {
-        (native_top, native_bottom)
-    } else {
-        (bitmap.height - native_bottom, bitmap.height - native_top)
-    };
-    if right > bitmap.width || bottom > bitmap.height {
-        return Err(MetafileError::InvalidBitmap {
-            record_index,
-            message: "source crop lies outside bitmap".into(),
-        });
-    }
-    let width = right - left;
-    let height = bottom - top;
-    if left == 0
-        && top == 0
-        && width == bitmap.width
-        && height == bitmap.height
-        && !flip_x
-        && !flip_y
-    {
-        return Ok(bitmap);
-    }
-    let capacity = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(4);
-    let mut rgba = Vec::with_capacity(usize::try_from(capacity).map_err(|_| {
-        MetafileError::InvalidBitmap {
-            record_index,
-            message: "source crop allocation overflow".into(),
-        }
-    })?);
-    for output_y in 0..height {
-        let row = if flip_y {
-            bottom - 1 - output_y
-        } else {
-            top + output_y
-        };
-        for output_x in 0..width {
-            let column = if flip_x {
-                right - 1 - output_x
-            } else {
-                left + output_x
-            };
-            let start = (u64::from(row) * u64::from(bitmap.width) + u64::from(column)) * 4;
-            rgba.extend_from_slice(&bitmap.rgba[start as usize..start as usize + 4]);
-        }
-    }
-    Ok(metafile_core::Bitmap {
-        width,
-        height,
-        rgba,
-    })
 }
 
 fn color(v: u32) -> Color {

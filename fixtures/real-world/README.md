@@ -9,7 +9,7 @@ Every added file must also have an entry in `../manifest.json` conforming to
 `../manifest.schema.json`. Reference images require their own provenance and
 the exact trusted renderer/version used to produce them.
 
-The `windows-gdi-*.wmf` files are project-owned qualification assets generated
+The `windows-gdi-*.wmf` and `windows-emf-*.emf` files are project-owned qualification assets generated
 through an actual Windows GDI metafile device context by
 `tools/windows-reference`. They are small, redistributable under the repository
 license, and are “real GDI-produced” rather than hand-assembled test bytes.

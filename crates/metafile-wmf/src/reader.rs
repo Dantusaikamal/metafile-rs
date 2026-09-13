@@ -41,10 +41,6 @@ impl<'a> Reader<'a> {
         let b = self.take(4)?;
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
-    pub fn i32(&mut self) -> Result<i32> {
-        let b = self.take(4)?;
-        Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    }
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let start = self.pos;
         let end = start

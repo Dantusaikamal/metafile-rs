@@ -12,6 +12,7 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 - [x] randomized malformed-input regression completes without a panic
 - [x] bounded cargo-fuzz run completed for inspect, permissive, and strict paths
 - [x] project-owned Windows-GDI/GDI+ corpus populated with redistribution provenance
+- [x] six project-owned ordinary EMF scenarios generated and deterministically rendered
 - [ ] independently sourced Office/DOCX WMF corpus populated
 - [x] initial trusted Windows reference comparisons completed with local diff artifacts
 - [x] common map modes have specification-derived unit coverage
@@ -22,6 +23,7 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 - [x] README compatibility table reviewed against implementation
 - [x] production dependency purposes documented
 - [x] no external WMF renderer or converter dependency
+- [x] no external EMF renderer or converter dependency
 - [x] workspace forbids unsafe Rust
 
 See `qualification-2026-09-11.md` for exact evidence and blockers. The public
