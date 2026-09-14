@@ -476,20 +476,110 @@ fn modify_world_transform_composes_and_can_reset() {
     assert!(svg.contains("M 5 0 L 25 0"), "{svg}");
 }
 
+fn object_player(handle: u32, object: GdiObject) -> Player {
+    let mut player = Player::new(ResourceLimits::default());
+    player.add_object(handle, object, 1).unwrap();
+    player
+}
+
 #[test]
-fn deleting_selected_handle_preserves_realized_dc_object() {
-    let mut pen = Vec::new();
-    pen.extend_from_slice(&1u32.to_le_bytes());
-    pen.extend_from_slice(&0u32.to_le_bytes());
-    pen.extend_from_slice(&i32s(&[1, 0]));
-    pen.extend_from_slice(&0u32.to_le_bytes());
-    let input = emf(&[
-        record(38, &pen),
-        record(37, &1u32.to_le_bytes()),
-        record(33, &[]),
-        record(40, &1u32.to_le_bytes()),
-    ]);
-    assert!(render(&input, false).is_ok());
+fn deleting_selected_pen_restores_default_pen() {
+    let custom = Pen {
+        color: Color::rgb(10, 20, 30),
+        width: 7.0,
+        ..Pen::default()
+    };
+    let mut player = object_player(1, GdiObject::Pen(custom));
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.delete_object(&1u32.to_le_bytes(), 3, 0).unwrap();
+    assert_eq!(player.dc.core.pen, Pen::default());
+    assert_eq!(player.dc.selected_pen, None);
+}
+
+#[test]
+fn deleting_selected_brush_restores_default_brush() {
+    let custom = Brush {
+        style: BrushStyle::Solid,
+        color: Color::rgb(10, 20, 30),
+    };
+    let mut player = object_player(1, GdiObject::Brush(custom));
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.delete_object(&1u32.to_le_bytes(), 3, 0).unwrap();
+    assert_eq!(player.dc.core.brush, Brush::default());
+    assert_eq!(player.dc.selected_brush, None);
+}
+
+#[test]
+fn deleting_selected_font_restores_default_font() {
+    let custom = Font {
+        family: "Deleted Font".into(),
+        height: 42.0,
+        ..Font::default()
+    };
+    let mut player = object_player(1, GdiObject::Font(custom));
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.delete_object(&1u32.to_le_bytes(), 3, 0).unwrap();
+    assert_eq!(player.dc.core.font, Font::default());
+    assert_eq!(player.dc.selected_font, None);
+}
+
+#[test]
+fn deleting_unselected_object_does_not_change_dc() {
+    let mut player = object_player(
+        1,
+        GdiObject::Pen(Pen {
+            color: Color::rgb(10, 20, 30),
+            ..Pen::default()
+        }),
+    );
+    let before = player.dc.clone();
+    player.delete_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    assert_eq!(player.dc.core, before.core);
+    assert_eq!(player.dc.selected_pen, before.selected_pen);
+}
+
+#[test]
+fn deleted_object_handle_can_be_reused() {
+    let mut player = object_player(1, GdiObject::Pen(Pen::default()));
+    player.delete_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    assert!(player
+        .add_object(1, GdiObject::Brush(Brush::default()), 3)
+        .is_ok());
+}
+
+#[test]
+fn save_select_delete_restore_keeps_default_object() {
+    let mut player = object_player(1, GdiObject::Pen(Pen::default()));
+    player.save_dc().unwrap();
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.delete_object(&1u32.to_le_bytes(), 3, 0).unwrap();
+    player.restore_dc(&(-1i32).to_le_bytes(), 4, 0).unwrap();
+    assert_eq!(player.dc.core.pen, Pen::default());
+    assert_eq!(player.dc.selected_pen, None);
+}
+
+#[test]
+fn deletion_sanitizes_an_older_saved_dc_reference() {
+    let first = Pen {
+        color: Color::rgb(10, 20, 30),
+        ..Pen::default()
+    };
+    let second = Pen {
+        color: Color::rgb(40, 50, 60),
+        ..Pen::default()
+    };
+    let mut player = object_player(1, GdiObject::Pen(first));
+    player
+        .add_object(2, GdiObject::Pen(second.clone()), 1)
+        .unwrap();
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.save_dc().unwrap();
+    player.select_object(&2u32.to_le_bytes(), 3, 0).unwrap();
+    player.delete_object(&1u32.to_le_bytes(), 4, 0).unwrap();
+    assert_eq!(player.dc.core.pen, second);
+    player.restore_dc(&(-1i32).to_le_bytes(), 5, 0).unwrap();
+    assert_eq!(player.dc.core.pen, Pen::default());
+    assert_eq!(player.dc.selected_pen, None);
 }
 
 #[test]

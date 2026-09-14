@@ -14,9 +14,9 @@ covers records exercised by committed fixtures and focused unit tests.
 - Objects: `CREATEPEN`, solid `EXTCREATEPEN` (including standard end caps and
   joins), solid/null
   `CREATEBRUSHINDIRECT`, `EXTCREATEFONTINDIRECTW`, `SELECTOBJECT`,
-  `DELETEOBJECT`, and common stock objects. Deleting a table handle preserves
-  the already-realized object value in current/saved DC state, matching common
-  GDI+ output and permitting deterministic handle reuse.
+  `DELETEOBJECT`, and common stock objects. Deleting an active object restores
+  the default object of that type in current and saved DC state, and the freed
+  handle can be reused deterministically.
 - Vectors: move/line, polyline/polygon/polypolygon and 16-bit variants,
   PolylineTo, PolyBezier/PolyBezierTo and 16-bit variants, rectangle,
   round-rectangle, ellipse, arc/ArcTo, pie, chord, and SetPixelV.

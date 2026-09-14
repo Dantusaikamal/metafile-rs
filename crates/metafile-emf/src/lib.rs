@@ -1175,16 +1175,17 @@ impl Player {
 
     fn delete_object(&mut self, payload: &[u8], record_index: usize, base: usize) -> Result<()> {
         let handle = read_u32(payload, 0, base)?;
-        if self.objects.remove(&handle).is_none() {
-            return Err(MetafileError::InvalidObjectHandle {
+        let object = self
+            .objects
+            .remove(&handle)
+            .ok_or(MetafileError::InvalidObjectHandle {
                 handle,
                 record_index,
-            });
+            })?;
+        reset_deleted_object(&mut self.dc, handle, &object);
+        for saved_dc in &mut self.stack {
+            reset_deleted_object(saved_dc, handle, &object);
         }
-        // EMF producers, including GDI+, commonly delete a logical handle
-        // immediately after its last draw while the realized object remains
-        // selected. Each DC snapshot owns the realized object value, so
-        // deleting/reusing the table handle must not invalidate saved state.
         Ok(())
     }
 
@@ -2272,6 +2273,24 @@ fn stock_object(index: u32) -> Option<GdiObject> {
         19 => GdiObject::Pen(Pen::default()),
         _ => return None,
     })
+}
+
+fn reset_deleted_object(dc: &mut EmfDc, handle: u32, object: &GdiObject) {
+    match object {
+        GdiObject::Pen(_) if dc.selected_pen == Some(handle) => {
+            dc.core.pen = Pen::default();
+            dc.selected_pen = None;
+        }
+        GdiObject::Brush(_) if dc.selected_brush == Some(handle) => {
+            dc.core.brush = Brush::default();
+            dc.selected_brush = None;
+        }
+        GdiObject::Font(_) if dc.selected_font == Some(handle) => {
+            dc.core.font = Font::default();
+            dc.selected_font = None;
+        }
+        _ => {}
+    }
 }
 
 fn combine_clip(a: Option<&ClipRegion>, b: Option<ClipRegion>) -> Option<ClipRegion> {

@@ -8,14 +8,22 @@ const [input, output, widthText = '600', heightText = '400'] = process.argv.slic
 if (!input || !output) throw new Error('usage: node scripts/rasterize-svg.mjs input.svg output.png [width] [height]');
 const width = Number(widthText), height = Number(heightText);
 const timeout = Number(process.env.METAFILE_RASTER_TIMEOUT_MS || 60_000);
-const candidates = process.platform === 'win32'
-  ? ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe']
+const platformCandidates = process.platform === 'win32'
+  ? [
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ]
   : ['google-chrome', 'chromium', 'chromium-browser'];
+const candidates = [...new Set([process.env.CHROME_PATH, ...platformCandidates].filter(Boolean))];
 const browser = candidates.find((candidate) => {
   const result = spawnSync(candidate, ['--version'], { stdio: 'ignore', timeout: 10_000 });
   return !result.error;
 });
-if (!browser) throw new Error('Chrome/Chromium/Edge not found');
+if (!browser) {
+  throw new Error(`Chrome/Chromium/Edge not found; attempted: ${candidates.join(', ')}`);
+}
 const directory = mkdtempSync(join(tmpdir(), 'metafile-rs-raster-'));
 try {
   const svg = readFileSync(resolve(input), 'utf8').replace(

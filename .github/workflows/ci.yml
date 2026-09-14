@@ -48,7 +48,8 @@ jobs:
         env:
           METAFILE_SKIP_CARGO_BUILD: "1"
       - run: node scripts/wasm-smoke.mjs
-      - uses: browser-actions/setup-chrome@v1
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
       - run: node scripts/wasm-browser-smoke.mjs
 
   windows-reference:
@@ -63,11 +64,14 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.425
-      - uses: browser-actions/setup-chrome@v1
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
       - shell: pwsh
         run: dotnet build tools/windows-reference/MetafileReference.csproj --configuration Release
       - shell: pwsh
         run: ./scripts/windows-qualification.ps1
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
       - if: always()
         uses: actions/upload-artifact@v4
         with:
