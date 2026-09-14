@@ -36,6 +36,9 @@ public static class MetafileReference
     [DllImport("gdi32.dll")] static extern bool Arc(IntPtr hdc, int left, int top, int right, int bottom, int sx, int sy, int ex, int ey);
     [DllImport("gdi32.dll")] static extern bool Pie(IntPtr hdc, int left, int top, int right, int bottom, int sx, int sy, int ex, int ey);
     [DllImport("gdi32.dll")] static extern bool Chord(IntPtr hdc, int left, int top, int right, int bottom, int sx, int sy, int ex, int ey);
+    [DllImport("gdi32.dll")] static extern int SetArcDirection(IntPtr hdc, int direction);
+    [DllImport("gdi32.dll")] static extern int SaveDC(IntPtr hdc);
+    [DllImport("gdi32.dll")] static extern bool RestoreDC(IntPtr hdc, int savedDc);
     [DllImport("gdi32.dll")] static extern bool PolyPolygon(IntPtr hdc, POINT[] points, int[] counts, int polygons);
     [DllImport("gdi32.dll")] static extern int SetPolyFillMode(IntPtr hdc, int mode);
     [DllImport("gdi32.dll")] static extern bool TextOut(IntPtr hdc, int x, int y, string text, int length);
@@ -60,6 +63,7 @@ public static class MetafileReference
         Directory.CreateDirectory(directory);
         GenerateVector(Path.Combine(directory, "windows-gdi-vector.wmf"));
         GenerateArcs(Path.Combine(directory, "windows-gdi-arcs.wmf"));
+        GenerateWmfArcMatrix(Path.Combine(directory, "windows-gdi-arc-matrix.wmf"));
         GeneratePolygons(Path.Combine(directory, "windows-gdi-polypolygon.wmf"));
         GenerateText(Path.Combine(directory, "windows-gdi-text.wmf"));
         GenerateBitmap(Path.Combine(directory, "windows-gdi-bitmap.wmf"));
@@ -71,6 +75,8 @@ public static class MetafileReference
         GenerateEnhancedBitmap(Path.Combine(directory, "windows-emf-bitmap.emf"));
         GenerateEnhancedState(Path.Combine(directory, "windows-emf-state.emf"));
         GenerateEnhancedAffine(Path.Combine(directory, "windows-emf-affine.emf"));
+        GenerateEnhancedArcMatrix(Path.Combine(directory, "windows-emf-arc-matrix.emf"));
+        GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus-only.emf"), EmfType.EmfPlusOnly);
         GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus.emf"), EmfType.EmfPlusDual);
     }
 
@@ -78,6 +84,19 @@ public static class MetafileReference
     {
         Directory.CreateDirectory(directory);
         GenerateEnhancedAffine(Path.Combine(directory, "windows-emf-affine.emf"));
+    }
+
+    public static void GenerateArcMatrix(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        GenerateWmfArcMatrix(Path.Combine(directory, "windows-gdi-arc-matrix.wmf"));
+        GenerateEnhancedArcMatrix(Path.Combine(directory, "windows-emf-arc-matrix.emf"));
+    }
+
+    public static void GenerateEmfPlusOnly(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus-only.emf"), EmfType.EmfPlusOnly);
     }
 
     static void WithWmf(string path, Action<IntPtr> draw)
@@ -126,6 +145,61 @@ public static class MetafileReference
             Chord(dc, 400, 20, 580, 140, 490, 20, 400, 80);
             Arc(dc, 40, 190, 560, 370, 560, 280, 559, 279);
             SelectObject(dc, old); DeleteObject(pen);
+        });
+    }
+
+    static void DrawArcMatrix(IntPtr dc, bool includeInvertedMappings)
+    {
+        IntPtr pen = CreatePen(0, 2, Rgb(35, 75, 170));
+        IntPtr brush = CreateSolidBrush(Rgb(235, 190, 55));
+        IntPtr oldPen = SelectObject(dc, pen), oldBrush = SelectObject(dc, brush);
+        // 90, 180, >180, and near-full sweeps distributed across all quadrants.
+        Arc(dc, 15, 15, 135, 95, 135, 55, 75, 15);
+        Arc(dc, 155, 15, 275, 95, 275, 55, 155, 55);
+        Arc(dc, 295, 15, 415, 95, 295, 55, 355, 15);
+        Arc(dc, 435, 15, 585, 95, 585, 55, 584, 54);
+        Arc(dc, 15, 115, 165, 205, 90, 115, 165, 160);
+        Arc(dc, 175, 115, 325, 205, 250, 205, 175, 160);
+        Pie(dc, 335, 115, 455, 205, 455, 160, 395, 115);
+        Chord(dc, 465, 115, 585, 205, 525, 115, 465, 160);
+
+        // Explicit clockwise state plus a representative coincident-endpoint case.
+        SetArcDirection(dc, 2);
+        Arc(dc, 15, 225, 165, 305, 165, 265, 90, 225);
+        Pie(dc, 175, 225, 325, 305, 250, 225, 250, 225);
+        SetArcDirection(dc, 1);
+
+        if (includeInvertedMappings)
+        {
+            // EMF preserves explicit viewport inversion reliably in the reference API.
+            int saved = SaveDC(dc);
+            SetMapMode(dc, 8); SetWindowOrgEx(dc, 0, 0, IntPtr.Zero); SetWindowExtEx(dc, 600, 400, IntPtr.Zero);
+            SetViewportOrgEx(dc, 600, 0, IntPtr.Zero); SetViewportExtEx(dc, -600, 400, IntPtr.Zero);
+            Arc(dc, 265, 225, 385, 305, 385, 265, 325, 225);
+            RestoreDC(dc, saved);
+            saved = SaveDC(dc);
+            SetMapMode(dc, 8); SetWindowOrgEx(dc, 0, 0, IntPtr.Zero); SetWindowExtEx(dc, 600, 400, IntPtr.Zero);
+            SetViewportOrgEx(dc, 0, 400, IntPtr.Zero); SetViewportExtEx(dc, 600, -400, IntPtr.Zero);
+            Pie(dc, 405, 95, 525, 175, 525, 135, 465, 95);
+            RestoreDC(dc, saved);
+            saved = SaveDC(dc);
+            SetMapMode(dc, 8); SetWindowOrgEx(dc, 0, 0, IntPtr.Zero); SetWindowExtEx(dc, 600, 400, IntPtr.Zero);
+            SetViewportOrgEx(dc, 600, 400, IntPtr.Zero); SetViewportExtEx(dc, -600, -400, IntPtr.Zero);
+            Chord(dc, 15, 15, 135, 95, 135, 55, 75, 15);
+            RestoreDC(dc, saved);
+        }
+
+        SelectObject(dc, oldPen); SelectObject(dc, oldBrush); DeleteObject(pen); DeleteObject(brush);
+    }
+
+    static void GenerateWmfArcMatrix(string path) { WithWmf(path, dc => DrawArcMatrix(dc, false)); }
+
+    static void GenerateEnhancedArcMatrix(string path)
+    {
+        WithEnhanced(path, graphics => {
+            IntPtr hdc = graphics.GetHdc();
+            try { DrawArcMatrix(hdc, true); }
+            finally { graphics.ReleaseHdc(hdc); }
         });
     }
 

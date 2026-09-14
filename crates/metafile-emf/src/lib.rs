@@ -283,7 +283,7 @@ fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
             offset,
             bytes: &bytes[offset..end],
         };
-        if kind == EMR_GDICOMMENT && is_emf_plus_comment(record.bytes)? {
+        if kind == EMR_GDICOMMENT && is_emf_plus_comment(record.bytes, limits)? {
             contains_emf_plus = true;
         }
         records.push(record);
@@ -374,7 +374,7 @@ fn read_description(
     Ok(Some(String::from_utf16_lossy(&units)))
 }
 
-fn is_emf_plus_comment(bytes: &[u8]) -> Result<bool> {
+fn is_emf_plus_comment(bytes: &[u8], limits: &ResourceLimits) -> Result<bool> {
     if bytes.len() < 12 {
         return Ok(false);
     }
@@ -390,7 +390,56 @@ fn is_emf_plus_comment(bytes: &[u8]) -> Result<bool> {
             available: bytes.len() - 12,
         });
     }
-    Ok(length >= 4 && &bytes[12..16] == b"EMF+")
+    if length < 4 || &bytes[12..16] != b"EMF+" {
+        return Ok(false);
+    }
+    let mut offset = 16usize;
+    let mut records = 0usize;
+    while offset < end {
+        records += 1;
+        if records > limits.max_records {
+            return Err(MetafileError::ResourceLimitExceeded {
+                resource: "EMF+ records per comment",
+                actual: records as u64,
+                limit: limits.max_records as u64,
+            });
+        }
+        if end - offset < 12 {
+            return Err(MetafileError::TruncatedInput {
+                offset,
+                needed: 12,
+                available: end - offset,
+            });
+        }
+        let size = usize::try_from(le_u32(bytes, offset + 4)?)
+            .map_err(|_| MetafileError::InvalidHeader("EMF+ record size overflow".into()))?;
+        let data_size = usize::try_from(le_u32(bytes, offset + 8)?)
+            .map_err(|_| MetafileError::InvalidHeader("EMF+ data size overflow".into()))?;
+        if size < 12 || size % 4 != 0 {
+            return Err(MetafileError::InvalidRecordSize {
+                offset,
+                words: u32::try_from(size / 4).unwrap_or(u32::MAX),
+            });
+        }
+        if data_size > size - 12 {
+            return Err(MetafileError::InvalidHeader(format!(
+                "EMF+ data size {data_size} exceeds record payload {}",
+                size - 12
+            )));
+        }
+        let record_end = offset
+            .checked_add(size)
+            .ok_or_else(|| MetafileError::InvalidHeader("EMF+ record end overflow".into()))?;
+        if record_end > end {
+            return Err(MetafileError::RecordOutOfBounds {
+                offset,
+                end: record_end,
+                input_len: end,
+            });
+        }
+        offset = record_end;
+    }
+    Ok(true)
 }
 
 #[derive(Clone)]
@@ -922,7 +971,7 @@ impl Player {
             std::cmp::Ordering::Equal => None,
         };
         let target = target.ok_or(MetafileError::InvalidRestoreDc {
-            value: value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+            value,
             record_index,
             stack_depth: self.stack.len(),
         })?;
@@ -1126,25 +1175,16 @@ impl Player {
 
     fn delete_object(&mut self, payload: &[u8], record_index: usize, base: usize) -> Result<()> {
         let handle = read_u32(payload, 0, base)?;
-        let used = std::iter::once(&self.dc)
-            .chain(self.stack.iter())
-            .any(|dc| {
-                dc.selected_pen == Some(handle)
-                    || dc.selected_brush == Some(handle)
-                    || dc.selected_font == Some(handle)
-            });
-        if used {
-            return Err(MetafileError::ObjectInUse {
-                handle,
-                record_index,
-            });
-        }
         if self.objects.remove(&handle).is_none() {
             return Err(MetafileError::InvalidObjectHandle {
                 handle,
                 record_index,
             });
         }
+        // EMF producers, including GDI+, commonly delete a logical handle
+        // immediately after its last draw while the realized object remains
+        // selected. Each DC snapshot owns the realized object value, so
+        // deleting/reusing the table handle must not invalidate saved state.
         Ok(())
     }
 

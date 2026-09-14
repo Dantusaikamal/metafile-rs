@@ -6,6 +6,25 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-MetafileFormat([string]$Path) {
+    if ([IO.Path]::GetExtension($Path).Equals('.wmf', [StringComparison]::OrdinalIgnoreCase)) {
+        return 'wmf'
+    }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $offset = 0
+    while ($offset + 8 -le $bytes.Length) {
+        $recordType = [BitConverter]::ToUInt32($bytes, $offset)
+        $recordSize = [BitConverter]::ToUInt32($bytes, $offset + 4)
+        if ($recordSize -lt 8 -or $recordSize -gt $bytes.Length - $offset) { break }
+        if ($recordType -eq 70 -and $recordSize -ge 16 -and [BitConverter]::ToUInt32($bytes, $offset + 12) -eq 0x2B464D45) {
+            return 'emfplus'
+        }
+        $offset += $recordSize
+    }
+    return 'emf'
+}
+
 $documentPath = (Resolve-Path -LiteralPath $Document).Path
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $outputPath -Force | Out-Null
@@ -25,7 +44,7 @@ try {
         $targetName = "$owner-$fileName"
         $target = Join-Path $outputPath $targetName
         [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
-        $format = [IO.Path]::GetExtension($targetName).TrimStart('.').ToLowerInvariant()
+        $format = Get-MetafileFormat $target
         $manifest += [ordered]@{
             name = "Office-extracted $targetName"
             file = "real-world/$targetName"
@@ -38,7 +57,7 @@ try {
             acquiredDate = (Get-Date -Format 'yyyy-MM-dd')
             sha256 = ((Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash).ToLowerInvariant()
             expectedFormat = $format
-            expectedSupport = 'render'
+            expectedSupport = if ($format -eq 'emfplus') { 'unsupported' } else { 'render' }
             placeable = $null
             notableFeatures = @('Office document extraction; record audit pending')
             notes = "Source document SHA-256: $sourceHash"

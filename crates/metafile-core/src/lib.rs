@@ -271,7 +271,7 @@ pub enum MetafileError {
         "invalid RestoreDC value {value} at record {record_index} with stack depth {stack_depth}"
     )]
     InvalidRestoreDc {
-        value: i16,
+        value: i32,
         record_index: usize,
         stack_depth: usize,
     },

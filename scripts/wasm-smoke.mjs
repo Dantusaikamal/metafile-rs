@@ -38,6 +38,17 @@ const emfFirst = metafileToSvg(emf, { strict: false });
 const emfSecond = metafileToSvg(emf, { strict: false });
 if (emfInfo.format !== "emf" || !emfFirst.svg.includes("<svg") || emfFirst.svg !== emfSecond.svg) throw new Error("EMF render failed");
 
+for (const fixture of ["windows-gdiplus-emfplus-only.emf", "windows-gdiplus-emfplus.emf"]) {
+  const bytes = new Uint8Array(await readFile(new URL(`../fixtures/real-world/${fixture}`, import.meta.url)));
+  if (inspectMetafile(bytes).format !== "emfplus") throw new Error(`${fixture} was not classified as EMF+`);
+  try {
+    metafileToSvg(bytes, { strict: false });
+    throw new Error(`${fixture} playback unexpectedly succeeded`);
+  } catch (error) {
+    if (error?.code !== "unsupported_feature") throw new Error(`${fixture} did not return structured unsupported playback`);
+  }
+}
+
 for (const call of [() => inspectWmf(emf), () => wmfToSvg(emf, { strict: false })]) {
   try {
     call();
@@ -45,6 +56,22 @@ for (const call of [() => inspectWmf(emf), () => wmfToSvg(emf, { strict: false }
   } catch (error) {
     if (error?.code !== "format_mismatch") throw new Error("WMF compatibility API did not return a structured format mismatch");
   }
+}
+
+const invalidRestore = new Uint8Array(await readFile(new URL("../fixtures/real-world/windows-emf-state.emf", import.meta.url)));
+const restoreView = new DataView(invalidRestore.buffer, invalidRestore.byteOffset, invalidRestore.byteLength);
+let restoreOffset = restoreView.getUint32(4, true);
+while (restoreOffset + 12 <= invalidRestore.length) {
+  const type = restoreView.getUint32(restoreOffset, true);
+  const size = restoreView.getUint32(restoreOffset + 4, true);
+  if (type === 34) { restoreView.setInt32(restoreOffset + 8, 70_000, true); break; }
+  restoreOffset += size;
+}
+try {
+  metafileToSvg(invalidRestore, { strict: false });
+  throw new Error("invalid RestoreDC unexpectedly succeeded");
+} catch (error) {
+  if (error?.code !== "invalid_restore_dc" || error?.restoreDcValue !== 70_000) throw new Error("RestoreDC i32 value was not preserved in the structured error");
 }
 
 try {

@@ -9,6 +9,12 @@ This release establishes substantial WMF support and a hardened ordinary-EMF
 engine. It is not a claim of complete Windows GDI compatibility. EMF+ is
 detected but its playback remains a roadmap feature.
 
+The intended 1.0 engine supports WMF, ordinary EMF, and EMF+ through the same
+first-party native/WASM byte-to-SVG API with structured diagnostics. After it
+is qualified, `emf-to-png` 1.0 is intended to use this backend for
+WMF/EMF/EMF+ to SVG/PNG/JPEG without Office, LibreOffice, Inkscape, Canvas, or
+an external conversion process. This is a roadmap, not a capability claim.
+
 ## Rust API
 
 ```rust
@@ -68,8 +74,9 @@ metafile facade composes playback + SVG rendering
 bindings/wasm: Uint8Array/bytes -> structured metadata/render result
 ```
 
-See [docs/architecture.md](docs/architecture.md) and
-[docs/dependencies.md](docs/dependencies.md).
+See [docs/architecture.md](docs/architecture.md),
+[docs/dependencies.md](docs/dependencies.md), and the evidence-based plan for
+the next pass in [docs/emfplus-plan.md](docs/emfplus-plan.md).
 
 ## Security
 

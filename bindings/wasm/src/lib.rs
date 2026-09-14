@@ -11,6 +11,7 @@ struct ErrorPayload {
     offset: Option<usize>,
     record_index: Option<usize>,
     record_type: Option<u32>,
+    restore_dc_value: Option<i32>,
 }
 fn js<T: Serialize>(value: &T) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(value)
@@ -31,6 +32,10 @@ fn structured_error(code: &str, message: &str) -> JsValue {
     object.into()
 }
 fn error(e: metafile_core::MetafileError) -> JsValue {
+    let restore_dc_value = match &e {
+        metafile_core::MetafileError::InvalidRestoreDc { value, .. } => Some(*value),
+        _ => None,
+    };
     let (offset, record_index) = match &e {
         metafile_core::MetafileError::TruncatedInput { offset, .. }
         | metafile_core::MetafileError::InvalidRecordSize { offset, .. }
@@ -68,6 +73,7 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         offset,
         record_index,
         record_type: None,
+        restore_dc_value,
     })
     .unwrap_or_else(|_| structured_error(code, &e.to_string()))
 }

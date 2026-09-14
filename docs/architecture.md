@@ -28,3 +28,20 @@ Points and vectors have distinct mapping operations. Origins affect points and
 rectangles, while pen widths, text advances, radii, and other extents receive
 scale only. Output bounds are renderer-owned and include vector stroke width;
 text bounds remain explicitly approximate.
+
+## Pre-EMF+ core audit
+
+Reusable without format leakage: `Transform`, `Path`/figures/cubic segments,
+fill rules, alpha `Color`/`Bitmap`, affine `BitmapPlacement`, `BitmapSampling`,
+text positioning, and rectangular/polygon/path/intersection clips. EMF+
+playback can therefore reuse geometry, transforms, image placement, limits,
+diagnostics, and the renderer boundary.
+
+Classic `Brush`, `Pen`, `Font`, and `DeviceContext` are deliberately not being
+treated as a complete GDI+ model. Paint-backed pens, gradients/textures,
+source-image rectangles and attributes, richer string layout, region boolean
+operations, containers, page units, and rendering-quality state need
+format-neutral renderer concepts during the dedicated EMF+ pass. Their exact
+ownership/resource representation is deferred until real object records drive
+tests; speculative EMF+ flags are not added to shared types. See
+`docs/emfplus-plan.md` for the P0/P1/P2 design boundary.

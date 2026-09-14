@@ -841,7 +841,7 @@ impl Player {
             usize::try_from(n).ok().and_then(|v| v.checked_sub(1))
         };
         let invalid = || MetafileError::InvalidRestoreDc {
-            value: n,
+            value: i32::from(n),
             record_index: index,
             stack_depth: self.stack.len(),
         };

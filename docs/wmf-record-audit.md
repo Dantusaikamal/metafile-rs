@@ -24,7 +24,7 @@ emitted. “Approximate” is never intended to imply Windows pixel identity.
 | `META_MOVETO`, `META_LINETO` | yes | rendered | Current position and mapped endpoints are tested. Non-copy ROP2 is not emulated. |
 | `META_POLYLINE`, `META_POLYGON`, `META_POLYPOLYGON` | yes | rendered | Signed points and fill rules are tested; a real GDI PolyPolygon reference case is included. |
 | `META_RECTANGLE`, `META_ROUNDRECT`, `META_ELLIPSE` | yes | rendered | Mapped bounds/radii and null paint objects are supported. Exact GDI bottom/right edge raster inclusion is rasterizer-dependent. |
-| `META_ARC`, `META_PIE`, `META_CHORD` | yes | rendered | Endpoints are projected, large-arc/closure are implemented, full ellipse uses two SVG arcs, and compatible-mode direction is not inverted by mirrored mapping. A limited Windows case is compared; the exhaustive inversion/quadrant matrix remains incomplete. |
+| `META_ARC`, `META_PIE`, `META_CHORD` | yes | rendered | Endpoints are projected, large-arc/closure are implemented, full ellipse uses two SVG arcs, and compatible-mode direction is not inverted by mirrored mapping. A broad Windows matrix now covers quadrant/sweep/closure/direction cases; WMF inverted mapping remains unit-tested because the GDI+ WMF oracle did not preserve the constructed inversion setup reliably. |
 | `META_SETPIXEL` | yes | rendered | Emits a one-unit SVG rectangle; device-pixel coverage is backend-dependent. |
 | `META_TEXTOUT`, `META_EXTTEXTOUT` | yes | rendered/approximate | Encoding, escaping, alignment, escapement, `dx`, ETO_OPAQUE and ETO_CLIPPED are tested. Font metrics and no-`dx` advancement are diagnostic approximations. |
 | `META_INTERSECTCLIPRECT` | yes | rendered | Rectangular intersection and SaveDC restoration are tested. |

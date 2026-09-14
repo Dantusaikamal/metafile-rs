@@ -1,6 +1,6 @@
 if (args.Length < 2)
 {
-    Console.Error.WriteLine("usage: MetafileReference <generate|generate-affine|render> <path> [output width height]");
+    Console.Error.WriteLine("usage: MetafileReference <generate|generate-affine|generate-arc-matrix|generate-emfplus-only|render> <path> [output width height]");
     return 2;
 }
 
@@ -11,6 +11,12 @@ switch (args[0])
         return 0;
     case "generate-affine" when args.Length == 2:
         MetafileReference.GenerateAffine(Path.GetFullPath(args[1]));
+        return 0;
+    case "generate-arc-matrix" when args.Length == 2:
+        MetafileReference.GenerateArcMatrix(Path.GetFullPath(args[1]));
+        return 0;
+    case "generate-emfplus-only" when args.Length == 2:
+        MetafileReference.GenerateEmfPlusOnly(Path.GetFullPath(args[1]));
         return 0;
     case "render" when args.Length == 5
         && int.TryParse(args[3], out var width)

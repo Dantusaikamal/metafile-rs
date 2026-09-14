@@ -199,6 +199,19 @@ fn save_restore_restores_transform() {
 }
 
 #[test]
+fn invalid_restore_dc_preserves_full_i32_value() {
+    let input = emf(&[record(34, &70_000i32.to_le_bytes())]);
+    assert!(matches!(
+        render(&input, false),
+        Err(MetafileError::InvalidRestoreDc {
+            value: 70_000,
+            record_index: 1,
+            stack_depth: 0
+        })
+    ));
+}
+
+#[test]
 fn renders_polygon_and_polypolygon() {
     let mut polygon = i32s(&[0, 0, 20, 20]);
     polygon.extend_from_slice(&3u32.to_le_bytes());
@@ -347,6 +360,28 @@ fn emf_plus_comment_validation_is_bounded_and_deterministic() {
     assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
     assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
 
+    let mut unknown = 16u32.to_le_bytes().to_vec();
+    unknown.extend_from_slice(b"EMF+");
+    unknown.extend_from_slice(&0x4fffu16.to_le_bytes());
+    unknown.extend_from_slice(&0u16.to_le_bytes());
+    unknown.extend_from_slice(&12u32.to_le_bytes());
+    unknown.extend_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        inspect(&emf(&[record(70, &unknown)])).unwrap().format,
+        MetafileFormat::EmfPlus
+    );
+
+    let mut bad_record = 16u32.to_le_bytes().to_vec();
+    bad_record.extend_from_slice(b"EMF+");
+    bad_record.extend_from_slice(&0x4001u16.to_le_bytes());
+    bad_record.extend_from_slice(&0u16.to_le_bytes());
+    bad_record.extend_from_slice(&20u32.to_le_bytes());
+    bad_record.extend_from_slice(&8u32.to_le_bytes());
+    assert!(matches!(
+        inspect(&emf(&[record(70, &bad_record)])),
+        Err(MetafileError::RecordOutOfBounds { .. })
+    ));
+
     let mut options = RenderOptions::default();
     options.limits.max_input_bytes = valid.len() - 1;
     assert!(matches!(
@@ -442,7 +477,7 @@ fn modify_world_transform_composes_and_can_reset() {
 }
 
 #[test]
-fn restores_selected_object_and_rejects_in_use_delete() {
+fn deleting_selected_handle_preserves_realized_dc_object() {
     let mut pen = Vec::new();
     pen.extend_from_slice(&1u32.to_le_bytes());
     pen.extend_from_slice(&0u32.to_le_bytes());
@@ -454,10 +489,7 @@ fn restores_selected_object_and_rejects_in_use_delete() {
         record(33, &[]),
         record(40, &1u32.to_le_bytes()),
     ]);
-    assert!(matches!(
-        render(&input, false),
-        Err(MetafileError::ObjectInUse { handle: 1, .. })
-    ));
+    assert!(render(&input, false).is_ok());
 }
 
 #[test]
