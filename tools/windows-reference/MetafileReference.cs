@@ -99,6 +99,149 @@ public static class MetafileReference
         GenerateEnhanced(Path.Combine(directory, "windows-gdiplus-emfplus-only.emf"), EmfType.EmfPlusOnly);
     }
 
+    public static void GenerateEmfPlusP1(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        GenerateEmfPlusVectors(Path.Combine(directory, "windows-gdiplus-emfplus-p1-vectors.emf"));
+        GenerateEmfPlusImages(Path.Combine(directory, "windows-gdiplus-emfplus-p1-images.emf"));
+        GenerateEmfPlusText(Path.Combine(directory, "windows-gdiplus-emfplus-p1-text.emf"));
+        GenerateEmfPlusRegions(Path.Combine(directory, "windows-gdiplus-emfplus-p1-regions.emf"));
+        GenerateEmfPlusState(Path.Combine(directory, "windows-gdiplus-emfplus-p1-state.emf"));
+    }
+
+    static void WithEmfPlus(string path, Action<Graphics> draw)
+    {
+        using (var reference = new Bitmap(1, 1))
+        using (var referenceGraphics = Graphics.FromImage(reference))
+        using (var stream = File.Create(path))
+        {
+            IntPtr hdc = referenceGraphics.GetHdc();
+            try {
+                using (var metafile = new Metafile(stream, hdc, new RectangleF(0, 0, 600, 400), MetafileFrameUnit.Pixel, EmfType.EmfPlusOnly))
+                using (var graphics = Graphics.FromImage(metafile)) draw(graphics);
+            }
+            finally { referenceGraphics.ReleaseHdc(hdc); }
+        }
+    }
+
+    static Bitmap QualificationBitmap()
+    {
+        var bitmap = new Bitmap(8, 6, PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.Clear(Color.Transparent);
+            using var red = new SolidBrush(Color.FromArgb(220, 230, 30, 50));
+            using var blue = new SolidBrush(Color.FromArgb(180, 20, 90, 230));
+            graphics.FillRectangle(red, 0, 0, 4, 6);
+            graphics.FillEllipse(blue, 2, 0, 6, 6);
+        }
+        return bitmap;
+    }
+
+    static void GenerateEmfPlusVectors(string path)
+    {
+        using var textureImage = QualificationBitmap();
+        WithEmfPlus(path, graphics =>
+        {
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var gradient = new LinearGradientBrush(new Rectangle(20, 20, 210, 100), Color.Red, Color.Blue, 25f);
+            gradient.Blend = new Blend { Positions = new[] { 0f, .35f, 1f }, Factors = new[] { 0f, .8f, 1f } };
+            gradient.TranslateTransform(8, 5);
+            graphics.FillRectangle(gradient, 20, 20, 210, 100);
+            using var texture = new TextureBrush(textureImage, WrapMode.TileFlipXY);
+            texture.TranslateTransform(12, 7);
+            graphics.FillEllipse(texture, 270, 20, 190, 110);
+            using var pen = new Pen(Color.DarkGreen, 5) { DashPattern = new[] { 3f, 1f, 1f, 1f }, DashOffset = 0.5f, LineJoin = LineJoin.Round };
+            graphics.DrawCurve(pen, new[] { new PointF(30, 200), new PointF(150, 145), new PointF(270, 250), new PointF(420, 170), new PointF(560, 260) }, .6f);
+            graphics.DrawClosedCurve(pen, new[] { new PointF(60, 300), new PointF(170, 275), new PointF(220, 360), new PointF(90, 370) }, .4f, FillMode.Winding);
+        });
+    }
+
+    static void GenerateEmfPlusImages(string path)
+    {
+        using var source = QualificationBitmap();
+        using var pngStream = new MemoryStream();
+        source.Save(pngStream, ImageFormat.Png);
+        pngStream.Position = 0;
+        using var pngImage = new Bitmap(pngStream);
+        using var jpegStream = new MemoryStream();
+        source.Save(jpegStream, ImageFormat.Jpeg);
+        jpegStream.Position = 0;
+        using var jpegImage = new Bitmap(jpegStream);
+        WithEmfPlus(path, graphics =>
+        {
+            graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+            graphics.DrawImage(pngImage, new Rectangle(30, 30, 220, 150), 1, 1, 6, 4, GraphicsUnit.Pixel);
+            graphics.DrawImage(jpegImage, new[] { new PointF(320, 35), new PointF(560, 70), new PointF(290, 220) }, new RectangleF(0, 0, 8, 6), GraphicsUnit.Pixel);
+            using var attributes = new ImageAttributes();
+            attributes.SetWrapMode(WrapMode.TileFlipXY, Color.Transparent, false);
+            var matrix = new ColorMatrix { Matrix33 = .55f };
+            attributes.SetColorMatrix(matrix);
+            graphics.DrawImage(source, new Rectangle(80, 250, 360, 110), 0, 0, 8, 6, GraphicsUnit.Pixel, attributes);
+        });
+    }
+
+    static void GenerateEmfPlusText(string path)
+    {
+        WithEmfPlus(path, graphics =>
+        {
+            using var font = new Font("Arial", 25, FontStyle.Bold | FontStyle.Italic, GraphicsUnit.Point);
+            using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord };
+            graphics.TranslateTransform(280, 170);
+            graphics.RotateTransform(-24);
+            graphics.ScaleTransform(1.15f, .85f);
+            graphics.DrawString("Wrapped Unicode Ω 日本 text for EMF+", font, Brushes.Navy, new RectangleF(-190, -70, 380, 140), format);
+        });
+    }
+
+    static void GenerateEmfPlusRegions(string path)
+    {
+        WithEmfPlus(path, graphics =>
+        {
+            using var region = new Region(new Rectangle(30, 30, 300, 250));
+            region.Union(new Rectangle(280, 80, 260, 230));
+            region.Exclude(new Rectangle(190, 120, 200, 100));
+            graphics.SetClip(region, CombineMode.Replace);
+            using var brush = new LinearGradientBrush(new Rectangle(0, 0, 600, 400), Color.Gold, Color.Purple, LinearGradientMode.ForwardDiagonal);
+            graphics.FillRectangle(brush, 0, 0, 600, 400);
+        });
+    }
+
+    static void GenerateEmfPlusState(string path)
+    {
+        WithEmfPlus(path, graphics =>
+        {
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var blue = new SolidBrush(Color.FromArgb(210, 40, 100, 220));
+            using var orange = new SolidBrush(Color.FromArgb(220, 240, 120, 20));
+            using var pen = new Pen(Color.DarkSlateBlue, 4);
+
+            var saved = graphics.Save();
+            graphics.TranslateTransform(115, 80);
+            graphics.RotateTransform(28);
+            graphics.ScaleTransform(1.25f, .7f);
+            graphics.FillRectangle(blue, -70, -35, 140, 70);
+            graphics.Restore(saved);
+            graphics.DrawRectangle(pen, 20, 145, 190, 90);
+
+            var container = graphics.BeginContainer(
+                new RectangleF(300, 35, 240, 150),
+                new RectangleF(0, 0, 144, 72),
+                GraphicsUnit.Point);
+            graphics.FillEllipse(orange, 18, 8, 108, 56);
+            graphics.EndContainer(container);
+
+            using var clipPath = new GraphicsPath();
+            clipPath.AddEllipse(280, 225, 260, 145);
+            graphics.SetClip(clipPath, CombineMode.Replace);
+            using var path = new GraphicsPath();
+            path.AddBezier(250, 365, 335, 175, 455, 410, 575, 225);
+            path.AddPie(315, 230, 180, 120, 20, 245);
+            graphics.FillPath(blue, path);
+            graphics.DrawPath(pen, path);
+        });
+    }
+
     static void WithWmf(string path, Action<IntPtr> draw)
     {
         string standard = path + ".standard";

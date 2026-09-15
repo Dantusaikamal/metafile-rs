@@ -1,10 +1,10 @@
 //! Safe, first-party EMF+ stream parsing and renderer-independent playback.
 
 use metafile_core::{
-    Bitmap, BitmapPlacement, BitmapSampling, ClipRegion, Color, Diagnostic, Font, GradientStop,
-    HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Paint, Path, PathFigure,
-    PathSegment, Point, Rect, RenderOptions, Renderer, ResourceLimits, Result, Stroke, TextRun,
-    Transform, Vector, VerticalTextAlignment,
+    Bitmap, BitmapPlacement, BitmapSampling, ClipOperation, ClipRegion, Color, Diagnostic, Font,
+    GradientStop, HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Paint, Path,
+    PathFigure, PathSegment, Point, Rect, RenderOptions, Renderer, ResourceLimits, Result, Stroke,
+    TextRun, Transform, Vector, VerticalTextAlignment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +21,12 @@ const DRAW_ELLIPSE: u16 = 0x400f;
 const FILL_PIE: u16 = 0x4010;
 const DRAW_PIE: u16 = 0x4011;
 const DRAW_ARC: u16 = 0x4012;
+const FILL_REGION: u16 = 0x4013;
 const FILL_PATH: u16 = 0x4014;
 const DRAW_PATH: u16 = 0x4015;
+const FILL_CLOSED_CURVE: u16 = 0x4016;
+const DRAW_CLOSED_CURVE: u16 = 0x4017;
+const DRAW_CURVE: u16 = 0x4018;
 const DRAW_BEZIERS: u16 = 0x4019;
 const DRAW_IMAGE: u16 = 0x401a;
 const DRAW_IMAGE_POINTS: u16 = 0x401b;
@@ -44,14 +48,14 @@ const SET_CLIP_RECT: u16 = 0x4032;
 const SET_CLIP_PATH: u16 = 0x4033;
 const SET_CLIP_REGION: u16 = 0x4034;
 const OFFSET_CLIP: u16 = 0x4035;
-const SET_COMPOSITING_MODE: u16 = 0x4039;
-const SET_COMPOSITING_QUALITY: u16 = 0x403a;
-const SET_RENDERING_ORIGIN: u16 = 0x403b;
-const SET_TEXT_RENDERING_HINT: u16 = 0x403c;
-const SET_TEXT_CONTRAST: u16 = 0x403d;
-const SET_INTERPOLATION_MODE: u16 = 0x403e;
-const SET_PIXEL_OFFSET_MODE: u16 = 0x403f;
-const SET_SMOOTHING_MODE: u16 = 0x4040;
+const SET_RENDERING_ORIGIN: u16 = 0x401d;
+const SET_SMOOTHING_MODE: u16 = 0x401e;
+const SET_TEXT_RENDERING_HINT: u16 = 0x401f;
+const SET_TEXT_CONTRAST: u16 = 0x4020;
+const SET_INTERPOLATION_MODE: u16 = 0x4021;
+const SET_PIXEL_OFFSET_MODE: u16 = 0x4022;
+const SET_COMPOSITING_MODE: u16 = 0x4023;
+const SET_COMPOSITING_QUALITY: u16 = 0x4024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Comment<'a> {
@@ -251,7 +255,7 @@ fn inspect_records(records: &[Record<'_>]) -> Result<EmfPlusInfo> {
         );
     }
     let graphics_version = u32_at(header.data, 0)?;
-    let header_flags = u32_at(header.data, 4)?;
+    let _emf_plus_flags = u32_at(header.data, 4)?;
     let logical_dpi_x = u32_at(header.data, 8)?;
     let logical_dpi_y = u32_at(header.data, 12)?;
     let object_count = records
@@ -267,7 +271,10 @@ fn inspect_records(records: &[Record<'_>]) -> Result<EmfPlusInfo> {
         ));
     }
     Ok(EmfPlusInfo {
-        dual: header_flags & 1 != 0 || header.flags & 1 != 0,
+        // The record-header D bit classifies Dual versus Only. The similarly
+        // named EmfPlusFlags field in EmfPlusHeaderData describes the display
+        // device and must not be used for stream classification.
+        dual: header.flags & 1 != 0,
         graphics_version,
         logical_dpi_x,
         logical_dpi_y,
@@ -287,6 +294,7 @@ enum Object {
     Image(Bitmap),
     Font(EmfPlusFont),
     StringFormat(StringFormat),
+    ImageAttributes(ImageAttributes),
     Unsupported(String),
 }
 
@@ -295,6 +303,14 @@ struct StringFormat {
     horizontal: HorizontalTextAlignment,
     vertical: VerticalTextAlignment,
     flags: u32,
+    trimming: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImageAttributes {
+    wrap_mode: u32,
+    clamp_color: Color,
+    object_clamp: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +443,8 @@ impl Player<'_> {
             FILL_POLYGON | DRAW_LINES | DRAW_BEZIERS => self.points(record, renderer),
             FILL_PIE | DRAW_PIE | DRAW_ARC => self.arc(record, renderer),
             FILL_PATH | DRAW_PATH => self.path(record, renderer),
+            FILL_REGION => self.fill_region(record, renderer),
+            FILL_CLOSED_CURVE | DRAW_CLOSED_CURVE | DRAW_CURVE => self.curve(record, renderer),
             DRAW_STRING => self.draw_string(record, renderer, diagnostics),
             DRAW_IMAGE | DRAW_IMAGE_POINTS => self.draw_image(record, renderer, diagnostics),
             SAVE => self.save(record),
@@ -450,8 +468,8 @@ impl Player<'_> {
                 self.state.clip = None;
                 Ok(())
             }
-            SET_CLIP_RECT => self.set_clip_rect(record, diagnostics),
-            SET_CLIP_PATH | SET_CLIP_REGION => self.set_clip_object(record, diagnostics),
+            SET_CLIP_RECT => self.set_clip_rect(record),
+            SET_CLIP_PATH | SET_CLIP_REGION => self.set_clip_object(record),
             OFFSET_CLIP => self.offset_clip(record, diagnostics),
             SET_COMPOSITING_MODE => {
                 self.state.compositing_mode = record.flags & 0xff;
@@ -759,6 +777,91 @@ impl Player<'_> {
         }
     }
 
+    fn fill_region(&self, record: Record<'_>, renderer: &mut dyn Renderer) -> Result<()> {
+        require_len(record, 4)?;
+        let paint = self.transform_paint(&self.paint(record, 0)?);
+        let id = usize::from(record.flags & 0xff);
+        let Object::Region(region) = self.object_ref(id, record)? else {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "FillRegion references a non-region object",
+            );
+        };
+        let region = transform_clip(region, self.effective_transform());
+        let clip = match &self.state.clip {
+            Some(current) => ClipRegion::Intersection(vec![current.clone(), region]),
+            None => region,
+        };
+        renderer.styled_path(
+            &rectangle_path(self.canvas),
+            None,
+            Some(&paint),
+            1,
+            Some(&clip),
+        )
+    }
+
+    fn curve(&self, record: Record<'_>, renderer: &mut dyn Renderer) -> Result<()> {
+        let fill = record.kind == FILL_CLOSED_CURVE;
+        let (paint, stroke, mut cursor) = if fill {
+            (Some(self.paint(record, 0)?), None, 4usize)
+        } else {
+            (
+                None,
+                Some(self.pen(usize::from(record.flags & 0xff), record)?),
+                0usize,
+            )
+        };
+        require_len(
+            record,
+            cursor + if record.kind == DRAW_CURVE { 16 } else { 8 },
+        )?;
+        let tension = f64::from(f32_at(record.data, cursor)?);
+        if !tension.is_finite() || tension < 0.0 {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "invalid curve tension",
+            );
+        }
+        cursor += 4;
+        let (offset, segments) = if record.kind == DRAW_CURVE {
+            let offset = usize::try_from(u32_at(record.data, cursor)?).unwrap_or(usize::MAX);
+            let segments = usize::try_from(u32_at(record.data, cursor + 4)?).unwrap_or(usize::MAX);
+            cursor += 8;
+            (offset, Some(segments))
+        } else {
+            (0, None)
+        };
+        let count = usize::try_from(u32_at(record.data, cursor)?).unwrap_or(usize::MAX);
+        cursor += 4;
+        self.check_points(count, "EMF+ curve points")?;
+        let points = read_points(
+            record.data,
+            cursor,
+            count,
+            record.flags & 0x4000 != 0,
+            record,
+        )?;
+        let closed = record.kind != DRAW_CURVE;
+        let path = cardinal_spline_path(&points, tension, closed, offset, segments, record)?;
+        let path = self.transform_path(&path);
+        let paint = paint.as_ref().map(|value| self.transform_paint(value));
+        let stroke = stroke.as_ref().map(|value| self.transform_stroke(value));
+        renderer.styled_path(
+            &path,
+            stroke.as_ref(),
+            paint.as_ref(),
+            1,
+            self.state.clip.as_ref(),
+        )
+    }
+
     fn draw_string(
         &self,
         record: Record<'_>,
@@ -781,6 +884,7 @@ impl Player<'_> {
                 Paint::LinearGradient { stops, .. } => {
                     stops.first().map_or(Color::BLACK, |stop| stop.color)
                 }
+                Paint::Texture { .. } => Color::BLACK,
                 Paint::Solid(color) => color,
             }
         };
@@ -824,7 +928,7 @@ impl Player<'_> {
         let units = (0..length)
             .map(|index| u16::from_le_bytes([encoded[index * 2], encoded[index * 2 + 1]]))
             .collect::<Vec<_>>();
-        let text = String::from_utf16_lossy(&units);
+        let mut text = String::from_utf16_lossy(&units);
         let font_id = usize::from(record.flags & 0xff);
         let Object::Font(font) = self.object_ref(font_id, record)? else {
             return invalid(
@@ -840,6 +944,7 @@ impl Player<'_> {
                 horizontal: HorizontalTextAlignment::Left,
                 vertical: VerticalTextAlignment::Top,
                 flags: 0,
+                trimming: 0,
             }
         } else {
             let id = usize::try_from(format_id).map_err(|_| {
@@ -862,12 +967,14 @@ impl Player<'_> {
             };
             *format
         };
-        if format.flags != 0 {
+        let unsupported_flags =
+            format.flags & !(0x0000_0001 | 0x0000_1000 | 0x0000_2000 | 0x0000_4000);
+        if unsupported_flags != 0 || format.trimming != 0 {
             self.note(
                 record,
                 diagnostics,
                 "emfplus_string_format_approximate",
-                "advanced StringFormat flags are not reproduced by SVG text",
+                "StringFormat trimming/direction flags are not fully reproduced by SVG text",
             )?;
         }
         self.note(
@@ -877,8 +984,30 @@ impl Player<'_> {
             "DrawString uses host SVG font metrics; exact GDI+ layout is not available",
         )?;
         let mut run_font = font.font.clone();
-        run_font.height *= self.unit_scale(font.unit, false);
-        let position = self.transform(layout_anchor(layout, format.horizontal, format.vertical));
+        run_font.height *= self.unit_scale(font.unit, true);
+        if format.flags & 0x1000 == 0 && layout.width() > 0.0 {
+            text = wrap_and_trim_text(
+                &text,
+                layout.width(),
+                run_font.height.abs(),
+                format.trimming,
+            );
+        }
+        let page = Transform {
+            m11: self.unit_scale(self.state.page_unit, false) * self.state.page_scale,
+            m22: self.unit_scale(self.state.page_unit, true) * self.state.page_scale,
+            ..Transform::IDENTITY
+        };
+        let position =
+            page.transform_point(layout_anchor(layout, format.horizontal, format.vertical));
+        let layout_clip = (format.flags & 0x4000 == 0
+            && layout.width() > 0.0
+            && layout.height() > 0.0)
+            .then(|| ClipRegion::Path {
+                path: self.transform_path(&rectangle_path(layout)),
+                fill_mode: 1,
+            });
+        let clip = combine_clip_regions(self.state.clip.as_ref(), layout_clip);
         renderer.text(&TextRun {
             position,
             text,
@@ -889,8 +1018,10 @@ impl Player<'_> {
             background_path: None,
             horizontal_align: format.horizontal,
             vertical_align: format.vertical,
-            clip: self.state.clip.clone(),
+            clip,
             dx: Vec::new(),
+            transform: self.state.transform,
+            right_to_left: format.flags & 1 != 0,
         })
     }
 
@@ -917,6 +1048,34 @@ impl Player<'_> {
             }
         };
         let attributes_id = u32_at(record.data, 0)?;
+        let attributes = if attributes_id == u32::MAX {
+            None
+        } else {
+            let id = usize::try_from(attributes_id).map_err(|_| {
+                malformed(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "image attributes id overflow",
+                )
+            })?;
+            match self.object_ref(id, record)? {
+                Object::ImageAttributes(attributes) => Some(*attributes),
+                Object::Unsupported(message) => {
+                    return Err(MetafileError::UnsupportedCriticalFeature(message.clone()))
+                }
+                _ => {
+                    return invalid(
+                        record.origin,
+                        record.index,
+                        record.kind,
+                        record.offset,
+                        "DrawImage references a non-image-attributes object",
+                    )
+                }
+            }
+        };
         if i32_at(record.data, 4)? != 2 {
             return invalid(
                 record.origin,
@@ -942,7 +1101,19 @@ impl Player<'_> {
             source.right = source.right.ceil();
             source.bottom = source.bottom.ceil();
         }
-        let cropped = crop_bitmap(bitmap, source, record)?;
+        let source_is_full_bitmap = source.left <= 0.0
+            && source.top <= 0.0
+            && source.right >= f64::from(bitmap.width)
+            && source.bottom >= f64::from(bitmap.height);
+        let mut cropped = crop_bitmap(bitmap, source, record)?;
+        let cropped_dimensions = (cropped.width, cropped.height);
+        let has_clamp_border = attributes.is_some_and(|attributes| attributes.wrap_mode == 4);
+        if let Some(attributes) = attributes {
+            if attributes.wrap_mode == 4 {
+                cropped =
+                    add_half_pixel_clamp_border(&cropped, attributes.clamp_color, self.limits)?;
+            }
+        }
         // Both records begin with ImageAttributesId, SrcUnit and SrcRectF.
         // DrawImage then stores DstRectF; DrawImagePoints stores Count and a
         // three-point destination parallelogram (MS-EMFPLUS 2.3.4.8/2.3.4.9).
@@ -970,19 +1141,23 @@ impl Player<'_> {
             let origin = points[0];
             let x_axis = Vector::new(points[1].x - origin.x, points[1].y - origin.y);
             let y_axis = Vector::new(points[2].x - origin.x, points[2].y - origin.y);
-            let placement = self.transform_placement(BitmapPlacement {
+            let mut placement = BitmapPlacement {
                 origin,
                 x_axis,
                 y_axis,
-            });
-            if attributes_id != u32::MAX {
-                self.note(
-                    record,
-                    diagnostics,
-                    "emfplus_image_attributes_unsupported",
-                    "image attributes and wrap mode are not yet applied",
-                )?;
+            };
+            // For an unqualified full-image DrawImagePoints, GDI+ maps the
+            // outer pixel centres into the destination parallelogram whereas
+            // SVG maps the image's outer edges. Inset by half a source pixel
+            // to preserve the observed GDI+ sampling geometry. Crops can
+            // sample adjacent source pixels and ImageAttributes define their
+            // own edge behavior, so neither uses this default full-image rule.
+            if attributes.is_none() && source_is_full_bitmap && !has_clamp_border {
+                placement =
+                    inset_bitmap_placement(placement, cropped_dimensions.0, cropped_dimensions.1);
             }
+            let placement = self.transform_placement(placement);
+            self.validate_image_attributes(attributes, record, diagnostics)?;
             return renderer.bitmap(
                 placement,
                 &cropped,
@@ -991,14 +1166,7 @@ impl Player<'_> {
             );
         };
         let placement = self.transform_placement(BitmapPlacement::from_rect(destination));
-        if attributes_id != u32::MAX {
-            self.note(
-                record,
-                diagnostics,
-                "emfplus_image_attributes_unsupported",
-                "image attributes and wrap mode are not yet applied",
-            )?;
-        }
+        self.validate_image_attributes(attributes, record, diagnostics)?;
         renderer.bitmap(
             placement,
             &cropped,
@@ -1067,7 +1235,23 @@ impl Player<'_> {
         self.containers.push((id, self.state.clone()));
         if record.kind == BEGIN_CONTAINER {
             let destination = rect_f(record.data, 0, record)?;
-            let source = rect_f(record.data, 16, record)?;
+            let mut source = rect_f(record.data, 16, record)?;
+            let source_unit = u32::from(record.flags & 0xff);
+            if source_unit > 6 {
+                return invalid(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "invalid container source unit",
+                );
+            }
+            let source_scale_x = self.unit_scale(source_unit, false);
+            let source_scale_y = self.unit_scale(source_unit, true);
+            source.left *= source_scale_x;
+            source.right *= source_scale_x;
+            source.top *= source_scale_y;
+            source.bottom *= source_scale_y;
             if source.width() == 0.0 || source.height() == 0.0 {
                 return invalid(
                     record.origin,
@@ -1199,11 +1383,7 @@ impl Player<'_> {
         Ok(())
     }
 
-    fn set_clip_rect(
-        &mut self,
-        record: Record<'_>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<()> {
+    fn set_clip_rect(&mut self, record: Record<'_>) -> Result<()> {
         let rect = self.transform_path(&rectangle_path(rect_f(record.data, 0, record)?));
         self.combine_clip(
             record,
@@ -1211,15 +1391,10 @@ impl Player<'_> {
                 path: rect,
                 fill_mode: 1,
             },
-            diagnostics,
         )
     }
 
-    fn set_clip_object(
-        &mut self,
-        record: Record<'_>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<()> {
+    fn set_clip_object(&mut self, record: Record<'_>) -> Result<()> {
         let id = usize::from(record.flags & 0xff);
         let clip = match self.object_ref(id, record)? {
             Object::Path(path) => ClipRegion::Path {
@@ -1237,15 +1412,10 @@ impl Player<'_> {
                 )
             }
         };
-        self.combine_clip(record, clip, diagnostics)
+        self.combine_clip(record, clip)
     }
 
-    fn combine_clip(
-        &mut self,
-        record: Record<'_>,
-        clip: ClipRegion,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<()> {
+    fn combine_clip(&mut self, record: Record<'_>, clip: ClipRegion) -> Result<()> {
         let mode = (record.flags >> 8) & 0x0f;
         self.state.clip = match mode {
             0 => Some(clip),
@@ -1253,14 +1423,34 @@ impl Player<'_> {
                 Some(current) => ClipRegion::Intersection(vec![current, clip]),
                 None => clip,
             }),
+            2..=5 => {
+                let current = self.state.clip.take().unwrap_or_else(|| {
+                    ClipRegion::Rect(Rect {
+                        left: -1.0e9,
+                        top: -1.0e9,
+                        right: 1.0e9,
+                        bottom: 1.0e9,
+                    })
+                });
+                Some(ClipRegion::Combine {
+                    operation: match mode {
+                        2 => ClipOperation::Union,
+                        3 => ClipOperation::Xor,
+                        4 => ClipOperation::Exclude,
+                        _ => ClipOperation::Complement,
+                    },
+                    left: Box::new(current),
+                    right: Box::new(clip),
+                })
+            }
             _ => {
-                self.note(
-                    record,
-                    diagnostics,
-                    "emfplus_clip_combine_unsupported",
-                    "clip Union, XOR, Exclude, and Complement are not yet renderer-neutral",
-                )?;
-                return Ok(());
+                return invalid(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "invalid clip combine mode",
+                )
             }
         };
         Ok(())
@@ -1374,10 +1564,6 @@ impl Player<'_> {
         }
     }
 
-    fn transform(&self, point: Point) -> Point {
-        self.effective_transform().transform_point(point)
-    }
-
     fn transform_path(&self, path: &Path) -> Path {
         transform_path(path, self.effective_transform())
     }
@@ -1389,20 +1575,47 @@ impl Player<'_> {
                 end,
                 stops,
                 wrap_mode,
+                transform,
+                gamma_corrected,
             } => Paint::LinearGradient {
-                start: self.transform(*start),
-                end: self.transform(*end),
+                start: *start,
+                end: *end,
                 stops: stops.clone(),
                 wrap_mode: *wrap_mode,
+                transform: self.effective_transform().compose(*transform),
+                gamma_corrected: *gamma_corrected,
+            },
+            Paint::Texture {
+                bitmap,
+                transform,
+                wrap_mode,
+                opacity,
+                do_not_transform,
+            } => Paint::Texture {
+                bitmap: bitmap.clone(),
+                transform: if *do_not_transform {
+                    *transform
+                } else {
+                    self.effective_transform().compose(*transform)
+                },
+                wrap_mode: *wrap_mode,
+                opacity: *opacity,
+                do_not_transform: *do_not_transform,
             },
             paint => paint.clone(),
         }
     }
 
     fn transform_stroke(&self, stroke: &Stroke) -> Stroke {
-        let vector = self
-            .effective_transform()
-            .transform_vector(Vector::new(stroke.width, 0.0));
+        let (logical_width, transform) = if stroke.unit == 0 {
+            (stroke.width, self.effective_transform())
+        } else {
+            (
+                stroke.width * self.unit_scale(stroke.unit, false),
+                self.state.transform,
+            )
+        };
+        let vector = transform.transform_vector(Vector::new(logical_width, 0.0));
         let mut result = stroke.clone();
         result.width = vector.x.hypot(vector.y).max(0.0);
         result.paint = self.transform_paint(&result.paint);
@@ -1426,10 +1639,38 @@ impl Player<'_> {
 
     fn sampling(&self) -> BitmapSampling {
         match self.state.interpolation_mode {
-            5..=7 => BitmapSampling::Smooth,
-            3 | 4 => BitmapSampling::Pixelated,
+            5 => BitmapSampling::Pixelated,
+            3 | 4 | 6 | 7 => BitmapSampling::Smooth,
             _ => BitmapSampling::Auto,
         }
+    }
+
+    fn validate_image_attributes(
+        &self,
+        attributes: Option<ImageAttributes>,
+        record: Record<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Result<()> {
+        if let Some(attributes) = attributes {
+            if attributes.wrap_mode > 4 || attributes.object_clamp > 1 {
+                return invalid(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "invalid image-attributes wrap or clamp mode",
+                );
+            }
+            if attributes.wrap_mode != 4 || attributes.clamp_color.a != 0 {
+                self.note(
+                    record,
+                    diagnostics,
+                    "emfplus_image_attributes_sampling",
+                    "image wrap/clamp attributes affect only samples outside the source rectangle",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn check_points(&self, count: usize, resource: &'static str) -> Result<()> {
@@ -1509,6 +1750,7 @@ fn parse_object(
         5 => parse_image(data, limits, record).map(Object::Image),
         6 => parse_font(data, limits, record).map(Object::Font),
         7 => parse_string_format(data, limits, record).map(Object::StringFormat),
+        8 => parse_image_attributes(data, record).map(Object::ImageAttributes),
         _ => Ok(Object::Unsupported(format!(
             "EMF+ object type {kind} is not implemented"
         ))),
@@ -1566,6 +1808,7 @@ fn parse_brush(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
                 background: argb(u32_at(data, 16)?),
             })
         }
+        2 => parse_texture_brush(&data[8..], limits, record),
         4 => parse_linear_gradient(&data[8..], limits, record),
         brush_type => Err(MetafileError::UnsupportedCriticalFeature(format!(
             "EMF+ brush type {brush_type} is not implemented"
@@ -1709,15 +1952,160 @@ fn parse_linear_gradient(
             });
         }
     } else if flags & (8 | 16) != 0 {
-        return Err(MetafileError::UnsupportedCriticalFeature(
-            "EMF+ blend-factor gradients are parsed but not yet converted to color stops".into(),
-        ));
+        if flags & 8 != 0 && flags & 16 != 0 {
+            return Err(MetafileError::UnsupportedCriticalFeature(
+                "simultaneous horizontal and vertical EMF+ blend factors require a two-dimensional gradient".into(),
+            ));
+        }
+        let (positions, factors) = parse_blend_factors(data, cursor, limits, record)?;
+        stops = positions
+            .into_iter()
+            .zip(factors)
+            .map(|(offset, factor)| GradientStop {
+                offset,
+                color: mix_color(end_color, start_color, factor),
+            })
+            .collect();
     }
     Ok(Paint::LinearGradient {
-        start: brush_transform.transform_point(Point::new(rect.left, rect.top)),
-        end: brush_transform.transform_point(Point::new(rect.right, rect.bottom)),
+        start: Point::new(rect.left, rect.top),
+        end: Point::new(rect.right, rect.bottom),
         stops,
         wrap_mode,
+        transform: brush_transform,
+        gamma_corrected: flags & 0x80 != 0,
+    })
+}
+
+fn parse_blend_factors(
+    data: &[u8],
+    cursor: usize,
+    limits: &ResourceLimits,
+    record: Record<'_>,
+) -> Result<(Vec<f64>, Vec<f64>)> {
+    if data.len() < cursor + 4 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "truncated gradient blend count",
+        );
+    }
+    let count = usize::try_from(u32_at(data, cursor)?).unwrap_or(usize::MAX);
+    if count < 2 || count > limits.max_gradient_stops {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ gradient stops",
+            actual: count as u64,
+            limit: limits.max_gradient_stops as u64,
+        });
+    }
+    let bytes = count.checked_mul(8).ok_or_else(|| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "gradient blend overflow",
+        )
+    })?;
+    if data.len() < cursor + 4 + bytes {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "truncated gradient blend data",
+        );
+    }
+    let mut positions = Vec::with_capacity(count);
+    let mut factors = Vec::with_capacity(count);
+    for index in 0..count {
+        let position = f64::from(f32_at(data, cursor + 4 + index * 4)?);
+        let factor = f64::from(f32_at(data, cursor + 4 + count * 4 + index * 4)?);
+        if !position.is_finite()
+            || !factor.is_finite()
+            || !(0.0..=1.0).contains(&position)
+            || !(0.0..=1.0).contains(&factor)
+            || positions
+                .last()
+                .is_some_and(|previous| position < *previous)
+        {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "invalid gradient blend position or factor",
+            );
+        }
+        positions.push(position);
+        factors.push(factor);
+    }
+    Ok((positions, factors))
+}
+
+fn mix_color(a: Color, b: Color, amount: f64) -> Color {
+    let channel = |left: u8, right: u8| {
+        (f64::from(left) + (f64::from(right) - f64::from(left)) * amount)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color {
+        r: channel(a.r, b.r),
+        g: channel(a.g, b.g),
+        b: channel(a.b, b.b),
+        a: channel(a.a, b.a),
+    }
+}
+
+fn parse_texture_brush(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result<Paint> {
+    if data.len() < 8 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "truncated texture brush",
+        );
+    }
+    let flags = u32_at(data, 0)?;
+    let wrap_mode = u32_at(data, 4)?;
+    if wrap_mode > 4 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "invalid texture wrap mode",
+        );
+    }
+    if wrap_mode == 4 {
+        return Err(MetafileError::UnsupportedCriticalFeature(
+            "EMF+ texture Clamp edge sampling is not implemented".into(),
+        ));
+    }
+    let mut cursor = 8;
+    let transform = if flags & 2 != 0 {
+        let end = checked_advance(cursor, 24, data.len(), record, "texture transform")?;
+        let value = read_transform(&data[cursor..end], record)?;
+        cursor = end;
+        value
+    } else {
+        Transform::IDENTITY
+    };
+    if flags & !(2 | 0x80 | 0x100) != 0 {
+        return Err(MetafileError::UnsupportedCriticalFeature(format!(
+            "texture brush flags {flags:#x} are not implemented"
+        )));
+    }
+    let bitmap = parse_image(&data[cursor..], limits, record)?;
+    Ok(Paint::Texture {
+        bitmap,
+        transform,
+        wrap_mode,
+        opacity: 1.0,
+        do_not_transform: flags & 0x100 != 0,
     })
 }
 
@@ -1732,6 +2120,16 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
         );
     }
     let flags = u32_at(data, 8)?;
+    let unit = u32_at(data, 12)?;
+    if unit > 6 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "invalid pen unit",
+        );
+    }
     let width = f64::from(f32_at(data, 16)?);
     if !width.is_finite() || width < 0.0 {
         return invalid(
@@ -1750,7 +2148,10 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
     let mut dash_style = 0u32;
     let mut dash_offset = 0.0;
     if flags & 1 != 0 {
-        cursor = checked_advance(cursor, 24, data.len(), record, "pen transform")?;
+        return Err(MetafileError::UnsupportedCriticalFeature(
+            "EMF+ pen transforms are not faithfully representable by the current stroke vocabulary"
+                .into(),
+        ));
     }
     if flags & 2 != 0 {
         cap = line_cap(u32_at(data, cursor)?);
@@ -1766,6 +2167,15 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
     }
     if flags & 0x10 != 0 {
         miter_limit = f64::from(f32_at(data, cursor)?);
+        if !miter_limit.is_finite() || miter_limit <= 0.0 {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "invalid pen miter limit",
+            );
+        }
         cursor = checked_advance(cursor, 4, data.len(), record, "miter limit")?;
     }
     if flags & 0x20 != 0 {
@@ -1773,10 +2183,25 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
         cursor = checked_advance(cursor, 4, data.len(), record, "dash style")?;
     }
     if flags & 0x40 != 0 {
+        let dash_cap = u32_at(data, cursor)?;
         cursor = checked_advance(cursor, 4, data.len(), record, "dashed cap")?;
+        if dash_cap != 0 {
+            return Err(MetafileError::UnsupportedCriticalFeature(
+                "non-flat EMF+ dash caps are not implemented".into(),
+            ));
+        }
     }
     if flags & 0x80 != 0 {
         dash_offset = f64::from(f32_at(data, cursor)?);
+        if !dash_offset.is_finite() {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "non-finite pen dash offset",
+            );
+        }
         cursor = checked_advance(cursor, 4, data.len(), record, "dash offset")?;
     }
     let mut dash_pattern = default_dash(dash_style);
@@ -1816,7 +2241,17 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
         dash_pattern.clear();
         dash_pattern.reserve(count);
         for index in 0..count {
-            dash_pattern.push(f64::from(f32_at(data, cursor + index * 4)?));
+            let entry = f64::from(f32_at(data, cursor + index * 4)?);
+            if !entry.is_finite() || entry < 0.0 {
+                return invalid(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "invalid pen dash entry",
+                );
+            }
+            dash_pattern.push(entry);
         }
         cursor = end;
     }
@@ -1835,6 +2270,7 @@ fn parse_pen(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result
     Ok(Stroke {
         paint,
         width,
+        unit,
         line_cap: cap,
         line_join: join,
         miter_limit,
@@ -1871,9 +2307,17 @@ fn parse_path(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resul
     }
     let flags = u32_at(data, 8)?;
     if flags & 0x0800 != 0 {
-        return Err(MetafileError::UnsupportedCriticalFeature(
-            "relative/RLE EMF+ path points are not implemented".into(),
-        ));
+        let (points, types_start) = read_relative_points_with_cursor(data, 12, count, record)?;
+        if data.len() < types_start + count {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "truncated relative path point types",
+            );
+        }
+        return path_from_types(&points, &data[types_start..types_start + count], record);
     }
     let compressed = flags & 0x4000 != 0;
     let point_size = if compressed { 4 } else { 8 };
@@ -1934,9 +2378,81 @@ fn parse_region(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Res
             limit: limits.max_region_nodes as u64,
         });
     }
-    let node_type = u32_at(data, 8)?;
+    let mut cursor = 8;
+    let mut parsed_nodes = 0usize;
+    let region = parse_region_node(data, &mut cursor, &mut parsed_nodes, 0, limits, record)?;
+    let expected = count.saturating_add(1);
+    if parsed_nodes != expected {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "region node count does not match its binary tree",
+        );
+    }
+    Ok(region)
+}
+
+fn parse_region_node(
+    data: &[u8],
+    cursor: &mut usize,
+    parsed_nodes: &mut usize,
+    depth: usize,
+    limits: &ResourceLimits,
+    record: Record<'_>,
+) -> Result<ClipRegion> {
+    if depth > limits.max_container_depth || *parsed_nodes >= limits.max_region_nodes {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ region tree complexity",
+            actual: (*parsed_nodes + 1) as u64,
+            limit: limits.max_region_nodes as u64,
+        });
+    }
+    let node_type = u32_at(data, *cursor)?;
+    *cursor = checked_advance(*cursor, 4, data.len(), record, "region node")?;
+    *parsed_nodes += 1;
     match node_type {
-        0x1000_0000 => Ok(ClipRegion::Rect(rect_f(data, 12, record)?)),
+        1..=5 => {
+            let left = parse_region_node(data, cursor, parsed_nodes, depth + 1, limits, record)?;
+            let right = parse_region_node(data, cursor, parsed_nodes, depth + 1, limits, record)?;
+            Ok(match node_type {
+                1 => ClipRegion::Intersection(vec![left, right]),
+                2 => ClipRegion::Combine {
+                    operation: ClipOperation::Union,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                3 => ClipRegion::Combine {
+                    operation: ClipOperation::Xor,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                4 => ClipRegion::Combine {
+                    operation: ClipOperation::Exclude,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+                _ => ClipRegion::Combine {
+                    operation: ClipOperation::Complement,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            })
+        }
+        0x1000_0000 => {
+            let rect = rect_f(data, *cursor, record)?;
+            *cursor = checked_advance(*cursor, 16, data.len(), record, "region rectangle")?;
+            Ok(ClipRegion::Rect(rect))
+        }
+        0x1000_0001 => {
+            let size = usize::try_from(u32_at(data, *cursor)?).unwrap_or(usize::MAX);
+            *cursor = checked_advance(*cursor, 4, data.len(), record, "region path size")?;
+            let end = checked_advance(*cursor, size, data.len(), record, "region path")?;
+            let path = parse_path(&data[*cursor..end], limits, record)?;
+            *cursor = end;
+            Ok(ClipRegion::Path { path, fill_mode: 1 })
+        }
         0x1000_0002 => Ok(ClipRegion::Polygon(Vec::new())),
         0x1000_0003 => Ok(ClipRegion::Rect(Rect {
             left: -1.0e9,
@@ -1961,11 +2477,17 @@ fn parse_image(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
     let stride = i32_at(data, 16)?;
     let pixel_format = u32_at(data, 20)?;
     let data_type = u32_at(data, 24)?;
+    if data_type == 1 {
+        return decode_compressed_image(&data[28..], limits, record);
+    }
     if data_type != 0 {
-        return Err(MetafileError::UnsupportedCriticalFeature(
-            "compressed EMF+ image payloads require format-aware decoding and are not implemented"
-                .into(),
-        ));
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "invalid EMF+ bitmap data type",
+        );
     }
     if width <= 0 || height == 0 || stride == 0 || stride % 4 != 0 {
         return invalid(
@@ -2008,13 +2530,14 @@ fn parse_image(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
         });
     }
     let bits = (pixel_format >> 8) & 0xff;
-    if bits != 32 {
+    if bits != 24 && bits != 32 {
         return Err(MetafileError::UnsupportedCriticalFeature(format!(
-            "EMF+ raw bitmap pixel format {pixel_format:#x} is not a supported 32-bit format"
+            "EMF+ raw bitmap pixel format {pixel_format:#x} is not a supported 24/32-bit format"
         )));
     }
+    let bytes_per_pixel = usize::try_from(bits / 8).unwrap_or(usize::MAX);
     let row_bytes = stride.unsigned_abs() as usize;
-    if row_bytes < width as usize * 4 {
+    if row_bytes < width as usize * bytes_per_pixel {
         return invalid(
             record.origin,
             record.index,
@@ -2050,12 +2573,16 @@ fn parse_image(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
         } else {
             height_abs as usize - 1 - y
         };
-        let source =
-            &data[28 + source_y * row_bytes..28 + source_y * row_bytes + width as usize * 4];
+        let source = &data[28 + source_y * row_bytes
+            ..28 + source_y * row_bytes + width as usize * bytes_per_pixel];
         for x in 0..width as usize {
-            let offset = x * 4;
-            let bgra = &source[offset..offset + 4];
-            let a = if has_alpha { bgra[3] } else { 255 };
+            let offset = x * bytes_per_pixel;
+            let bgra = &source[offset..offset + bytes_per_pixel];
+            let a = if has_alpha && bytes_per_pixel == 4 {
+                bgra[3]
+            } else {
+                255
+            };
             let unpremultiply = |value: u8| {
                 if premultiplied && a != 0 {
                     ((u16::from(value) * 255) / u16::from(a)).min(255) as u8
@@ -2073,6 +2600,209 @@ fn parse_image(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
     Ok(Bitmap {
         width,
         height: height_abs,
+        rgba,
+    })
+}
+
+fn decode_compressed_image(
+    encoded: &[u8],
+    limits: &ResourceLimits,
+    record: Record<'_>,
+) -> Result<Bitmap> {
+    if encoded.len() > limits.max_object_bytes {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ encoded image bytes",
+            actual: encoded.len() as u64,
+            limit: limits.max_object_bytes as u64,
+        });
+    }
+    if encoded.starts_with(b"\x89PNG\r\n\x1a\n") {
+        decode_png(encoded, limits, record)
+    } else if encoded.starts_with(&[0xff, 0xd8]) {
+        decode_jpeg(encoded, limits, record)
+    } else {
+        Err(MetafileError::UnsupportedCriticalFeature(
+            "compressed EMF+ bitmap is neither PNG nor JPEG".into(),
+        ))
+    }
+}
+
+fn check_decoded_dimensions(width: u32, height: u32, limits: &ResourceLimits) -> Result<usize> {
+    if width == 0 || height == 0 || width > limits.max_dimension || height > limits.max_dimension {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ bitmap dimension",
+            actual: u64::from(width.max(height)),
+            limit: u64::from(limits.max_dimension),
+        });
+    }
+    let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(
+        MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ decoded pixels",
+            actual: u64::MAX,
+            limit: limits.max_pixels,
+        },
+    )?;
+    if pixels > limits.max_pixels {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ decoded pixels",
+            actual: pixels,
+            limit: limits.max_pixels,
+        });
+    }
+    usize::try_from(pixels.saturating_mul(4)).map_err(|_| MetafileError::ResourceLimitExceeded {
+        resource: "EMF+ decoded image bytes",
+        actual: u64::MAX,
+        limit: limits.max_pixels.saturating_mul(4),
+    })
+}
+
+fn decode_png(encoded: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result<Bitmap> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().map_err(|error| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            &format!("invalid PNG image: {error}"),
+        )
+    })?;
+    let (width, height) = (reader.info().width, reader.info().height);
+    let rgba_len = check_decoded_dimensions(width, height, limits)?;
+    if reader.output_buffer_size() > rgba_len {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ PNG decode buffer",
+            actual: reader.output_buffer_size() as u64,
+            limit: rgba_len as u64,
+        });
+    }
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut pixels).map_err(|error| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            &format!("invalid PNG pixels: {error}"),
+        )
+    })?;
+    pixels.truncate(info.buffer_size());
+    let rgba = pixels_to_rgba(&pixels, info.color_type, width, height, record)?;
+    Ok(Bitmap {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn pixels_to_rgba(
+    decoded: &[u8],
+    color_type: png::ColorType,
+    width: u32,
+    height: u32,
+    record: Record<'_>,
+) -> Result<Vec<u8>> {
+    let channels = match color_type {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::Rgb => 3,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "PNG palette was not expanded",
+            )
+        }
+    };
+    let count = usize::try_from(u64::from(width) * u64::from(height)).unwrap_or(usize::MAX);
+    if decoded.len() != count.saturating_mul(channels) {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "PNG decoded byte count is inconsistent",
+        );
+    }
+    let mut rgba = Vec::with_capacity(count * 4);
+    for pixel in decoded.chunks_exact(channels) {
+        match color_type {
+            png::ColorType::Grayscale => rgba.extend([pixel[0], pixel[0], pixel[0], 255]),
+            png::ColorType::Rgb => rgba.extend([pixel[0], pixel[1], pixel[2], 255]),
+            png::ColorType::GrayscaleAlpha => rgba.extend([pixel[0], pixel[0], pixel[0], pixel[1]]),
+            png::ColorType::Rgba => rgba.extend_from_slice(pixel),
+            png::ColorType::Indexed => unreachable!(),
+        }
+    }
+    Ok(rgba)
+}
+
+fn decode_jpeg(encoded: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result<Bitmap> {
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(encoded));
+    decoder.read_info().map_err(|error| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            &format!("invalid JPEG header: {error}"),
+        )
+    })?;
+    let info = decoder.info().ok_or_else(|| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "JPEG has no image information",
+        )
+    })?;
+    let width = u32::from(info.width);
+    let height = u32::from(info.height);
+    let rgba_len = check_decoded_dimensions(width, height, limits)?;
+    let pixels = decoder.decode().map_err(|error| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            &format!("invalid JPEG pixels: {error}"),
+        )
+    })?;
+    let channels = match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => 1,
+        jpeg_decoder::PixelFormat::RGB24 => 3,
+        _ => {
+            return Err(MetafileError::UnsupportedCriticalFeature(format!(
+                "JPEG pixel format {:?} is not implemented",
+                info.pixel_format
+            )))
+        }
+    };
+    if pixels.len().saturating_mul(4) / channels != rgba_len {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "JPEG decoded byte count is inconsistent",
+        );
+    }
+    let mut rgba = Vec::with_capacity(rgba_len);
+    for pixel in pixels.chunks_exact(channels) {
+        if channels == 1 {
+            rgba.extend([pixel[0], pixel[0], pixel[0], 255]);
+        } else {
+            rgba.extend([pixel[0], pixel[1], pixel[2], 255]);
+        }
+    }
+    Ok(Bitmap {
+        width,
+        height,
         rgba,
     })
 }
@@ -2196,6 +2926,40 @@ fn parse_string_format(
         horizontal,
         vertical,
         flags,
+        trimming: u32_at(data, 36)?,
+    })
+}
+
+fn parse_image_attributes(data: &[u8], record: Record<'_>) -> Result<ImageAttributes> {
+    if data.len() < 24 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "truncated image-attributes object",
+        );
+    }
+    let wrap_mode = u32_at(data, 8)?;
+    let object_clamp = u32_at(data, 16)?;
+    if wrap_mode > 4 || object_clamp > 1 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "invalid image-attributes wrap or clamp mode",
+        );
+    }
+    if data.len() > 24 && data[24..].iter().any(|byte| *byte != 0) {
+        return Err(MetafileError::UnsupportedCriticalFeature(
+            "extended EMF+ image adjustments (including color matrices) are not implemented".into(),
+        ));
+    }
+    Ok(ImageAttributes {
+        wrap_mode,
+        clamp_color: argb(u32_at(data, 12)?),
+        object_clamp,
     })
 }
 
@@ -2437,6 +3201,15 @@ fn read_relative_points(
     count: usize,
     record: Record<'_>,
 ) -> Result<Vec<Point>> {
+    read_relative_points_with_cursor(data, offset, count, record).map(|(points, _)| points)
+}
+
+fn read_relative_points_with_cursor(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    record: Record<'_>,
+) -> Result<(Vec<Point>, usize)> {
     let mut cursor = offset;
     let mut current = Point::new(0.0, 0.0);
     let mut points = Vec::with_capacity(count);
@@ -2446,7 +3219,7 @@ fn read_relative_points(
         current = Point::new(current.x + f64::from(x), current.y + f64::from(y));
         points.push(current);
     }
-    Ok(points)
+    Ok((points, cursor))
 }
 
 fn read_relative_integer(data: &[u8], cursor: &mut usize, record: Record<'_>) -> Result<i16> {
@@ -2613,6 +3386,75 @@ fn crop_bitmap(bitmap: &Bitmap, source: Rect, record: Record<'_>) -> Result<Bitm
     })
 }
 
+fn add_half_pixel_clamp_border(
+    bitmap: &Bitmap,
+    clamp: Color,
+    limits: &ResourceLimits,
+) -> Result<Bitmap> {
+    let width = bitmap
+        .width
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ clamped bitmap dimension",
+            actual: u64::MAX,
+            limit: u64::from(limits.max_dimension),
+        })?;
+    let height = bitmap
+        .height
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2))
+        .ok_or(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ clamped bitmap dimension",
+            actual: u64::MAX,
+            limit: u64::from(limits.max_dimension),
+        })?;
+    let bytes = check_decoded_dimensions(width, height, limits)?;
+    let mut rgba = vec![0; bytes];
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        *pixel = [clamp.r, clamp.g, clamp.b, clamp.a];
+    }
+    for y in 0..bitmap.height as usize {
+        for x in 0..bitmap.width as usize {
+            let source = (y * bitmap.width as usize + x) * 4;
+            for target_y in [y * 2 + 1, y * 2 + 2] {
+                for target_x in [x * 2 + 1, x * 2 + 2] {
+                    let target = (target_y * width as usize + target_x) * 4;
+                    rgba[target..target + 4].copy_from_slice(&bitmap.rgba[source..source + 4]);
+                }
+            }
+        }
+    }
+    Ok(Bitmap {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn inset_bitmap_placement(
+    placement: BitmapPlacement,
+    source_width: u32,
+    source_height: u32,
+) -> BitmapPlacement {
+    let x_inset = 0.5 / f64::from(source_width.max(1));
+    let y_inset = 0.5 / f64::from(source_height.max(1));
+    BitmapPlacement {
+        origin: Point::new(
+            placement.origin.x + placement.x_axis.x * x_inset + placement.y_axis.x * y_inset,
+            placement.origin.y + placement.x_axis.y * x_inset + placement.y_axis.y * y_inset,
+        ),
+        x_axis: Vector::new(
+            placement.x_axis.x * (1.0 - 2.0 * x_inset),
+            placement.x_axis.y * (1.0 - 2.0 * x_inset),
+        ),
+        y_axis: Vector::new(
+            placement.y_axis.x * (1.0 - 2.0 * y_inset),
+            placement.y_axis.y * (1.0 - 2.0 * y_inset),
+        ),
+    }
+}
+
 fn layout_anchor(
     layout: Rect,
     horizontal: HorizontalTextAlignment,
@@ -2629,6 +3471,58 @@ fn layout_anchor(
         VerticalTextAlignment::Bottom => layout.bottom,
     };
     Point::new(x, y)
+}
+
+fn combine_clip_regions(
+    current: Option<&ClipRegion>,
+    incoming: Option<ClipRegion>,
+) -> Option<ClipRegion> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => {
+            Some(ClipRegion::Intersection(vec![current.clone(), incoming]))
+        }
+        (Some(current), None) => Some(current.clone()),
+        (None, incoming) => incoming,
+    }
+}
+
+fn wrap_and_trim_text(text: &str, width: f64, font_size: f64, trimming: u32) -> String {
+    let capacity = (width / (font_size.max(1.0) * 0.6)).floor().max(1.0) as usize;
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        let mut line = String::new();
+        for word in source_line.split_inclusive(char::is_whitespace) {
+            if !line.is_empty() && line.chars().count() + word.chars().count() > capacity {
+                lines.push(std::mem::take(&mut line));
+            }
+            if word.chars().count() > capacity {
+                for ch in word.chars() {
+                    if line.chars().count() == capacity {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    line.push(ch);
+                }
+            } else {
+                line.push_str(word);
+            }
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    if trimming >= 3 {
+        for line in &mut lines {
+            if line.chars().count() > capacity {
+                *line = line
+                    .chars()
+                    .take(capacity.saturating_sub(1))
+                    .collect::<String>()
+                    + "…";
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 fn argb(value: u32) -> Color {
@@ -2806,6 +3700,74 @@ fn points_path(points: &[Point], bezier: bool, closed: bool, record: Record<'_>)
     })
 }
 
+fn cardinal_spline_path(
+    points: &[Point],
+    tension: f64,
+    closed: bool,
+    offset: usize,
+    segments: Option<usize>,
+    record: Record<'_>,
+) -> Result<Path> {
+    if points.len() < if closed { 3 } else { 2 } {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "cardinal spline has too few points",
+        );
+    }
+    let segment_count = segments.unwrap_or_else(|| points.len().saturating_sub(1));
+    if !closed && (offset >= points.len() - 1 || segment_count > points.len() - 1 - offset) {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "cardinal spline offset or segment count is out of range",
+        );
+    }
+    let start_index = if closed { 0 } else { offset };
+    let mut path = PathFigure {
+        start: points[start_index],
+        segments: Vec::with_capacity(if closed { points.len() } else { segment_count }),
+        closed,
+    };
+    let count = if closed { points.len() } else { segment_count };
+    for step in 0..count {
+        let i = start_index + step;
+        let p1 = points[i % points.len()];
+        let p0 = if i == 0 {
+            if closed {
+                points[points.len() - 1]
+            } else {
+                p1
+            }
+        } else {
+            points[i - 1]
+        };
+        let p2 = if closed {
+            points[(i + 1) % points.len()]
+        } else {
+            points[i + 1]
+        };
+        let p3 = if closed {
+            points[(i + 2) % points.len()]
+        } else {
+            points.get(i + 2).copied().unwrap_or(p2)
+        };
+        let factor = tension / 3.0;
+        path.segments.push(PathSegment::Cubic {
+            control1: Point::new(p1.x + (p2.x - p0.x) * factor, p1.y + (p2.y - p0.y) * factor),
+            control2: Point::new(p2.x - (p3.x - p1.x) * factor, p2.y - (p3.y - p1.y) * factor),
+            to: p2,
+        });
+    }
+    Ok(Path {
+        figures: vec![path],
+    })
+}
+
 fn path_from_types(points: &[Point], types: &[u8], record: Record<'_>) -> Result<Path> {
     let mut figures: Vec<PathFigure> = Vec::new();
     let mut index = 0usize;
@@ -2940,6 +3902,15 @@ fn transform_clip(clip: &ClipRegion, transform: Transform) -> ClipRegion {
                 .map(|region| transform_clip(region, transform))
                 .collect(),
         ),
+        ClipRegion::Combine {
+            operation,
+            left,
+            right,
+        } => ClipRegion::Combine {
+            operation: *operation,
+            left: Box::new(transform_clip(left, transform)),
+            right: Box::new(transform_clip(right, transform)),
+        },
     }
 }
 
@@ -2958,8 +3929,12 @@ fn record_name(kind: u16) -> &'static str {
         FILL_PIE => "EmfPlusFillPie",
         DRAW_PIE => "EmfPlusDrawPie",
         DRAW_ARC => "EmfPlusDrawArc",
+        FILL_REGION => "EmfPlusFillRegion",
         FILL_PATH => "EmfPlusFillPath",
         DRAW_PATH => "EmfPlusDrawPath",
+        FILL_CLOSED_CURVE => "EmfPlusFillClosedCurve",
+        DRAW_CLOSED_CURVE => "EmfPlusDrawClosedCurve",
+        DRAW_CURVE => "EmfPlusDrawCurve",
         DRAW_BEZIERS => "EmfPlusDrawBeziers",
         DRAW_IMAGE => "EmfPlusDrawImage",
         DRAW_IMAGE_POINTS => "EmfPlusDrawImagePoints",
@@ -3106,6 +4081,24 @@ mod tests {
         assert!(info.dual);
         assert!(info.has_eof);
         assert_eq!(info.record_count, 2);
+    }
+
+    #[test]
+    fn only_or_dual_comes_from_the_header_record_flag() {
+        let mut only = stream(false, &[]);
+        only[16..20].copy_from_slice(&1u32.to_le_bytes());
+        assert!(
+            !inspect(&[comment(&only)], &ResourceLimits::default())
+                .unwrap()
+                .dual
+        );
+
+        let dual = stream(true, &[]);
+        assert!(
+            inspect(&[comment(&dual)], &ResourceLimits::default())
+                .unwrap()
+                .dual
+        );
     }
 
     #[test]
@@ -3317,7 +4310,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            svg.contains("x=\"65\" y=\"52\"") && svg.contains("Ω"),
+            svg.contains("x=\"60\" y=\"45\"")
+                && svg.contains("matrix(1 0 0 1 5 7)")
+                && svg.contains("Ω"),
             "{svg}"
         );
     }
@@ -3446,7 +4441,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            svg.contains("x1=\"16\" y1=\"20\" x2=\"36\" y2=\"80\""),
+            svg.contains("x1=\"0\" y1=\"0\" x2=\"10\" y2=\"20\"")
+                && svg.contains("gradientTransform=\"matrix(2 0 0 3 16 20)\""),
             "{svg}"
         );
     }
@@ -3486,11 +4482,11 @@ mod tests {
 
     #[test]
     fn unsupported_objects_fail_only_when_materially_used() {
-        let texture = record(OBJECT, 0x0100, bytes_u32(&[0xdbc0_1002, 2]));
-        assert!(render(&stream(false, std::slice::from_ref(&texture)), false).is_ok());
+        let path_gradient = record(OBJECT, 0x0100, bytes_u32(&[0xdbc0_1002, 3]));
+        assert!(render(&stream(false, std::slice::from_ref(&path_gradient)), false).is_ok());
         let mut rect = bytes_u32(&[0, 1]);
         rect.extend_from_slice(&floats(&[0.0, 0.0, 10.0, 10.0]));
-        let used = stream(false, &[texture, record(FILL_RECTS, 0, rect)]);
+        let used = stream(false, &[path_gradient, record(FILL_RECTS, 0, rect)]);
         let (_, diagnostics) = render(&used, false).unwrap();
         assert!(diagnostics
             .iter()
@@ -3553,5 +4549,177 @@ mod tests {
             render(&data, false),
             Err(MetafileError::InvalidEmfPlus { .. })
         ));
+    }
+
+    fn dummy_record() -> Record<'static> {
+        Record {
+            index: 0,
+            kind: OBJECT,
+            flags: 0,
+            offset: 0,
+            origin: Origin {
+                logical_start: 0,
+                logical_end: 0,
+                outer_record_index: 0,
+                absolute_start: 0,
+            },
+            data: &[],
+        }
+    }
+
+    #[test]
+    fn decodes_png_and_jpeg_images_with_bounded_dimensions() {
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[255, 0, 0, 128, 0, 0, 255, 255])
+                .unwrap();
+        }
+        let png = decode_compressed_image(&png_bytes, &ResourceLimits::default(), dummy_record())
+            .unwrap();
+        assert_eq!((png.width, png.height), (2, 1));
+        assert_eq!(png.rgba, [255, 0, 0, 128, 0, 0, 255, 255]);
+
+        let mut jpeg_bytes = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg_bytes, 100)
+            .encode(&[240, 20, 10], 1, 1, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        let jpeg = decode_compressed_image(&jpeg_bytes, &ResourceLimits::default(), dummy_record())
+            .unwrap();
+        assert_eq!((jpeg.width, jpeg.height), (1, 1));
+        assert!(jpeg.rgba[0] > 200 && jpeg.rgba[1] < 60 && jpeg.rgba[3] == 255);
+
+        assert!(matches!(
+            decode_compressed_image(b"not an image", &ResourceLimits::default(), dummy_record()),
+            Err(MetafileError::UnsupportedCriticalFeature(_))
+        ));
+    }
+
+    #[test]
+    fn texture_brush_embeds_a_deterministic_transformed_pattern() {
+        let mut image = bytes_u32(&[0xdbc0_1002, 1, 1, 1, 4, 0x0026_200a, 0]);
+        image.extend_from_slice(&[0, 0, 255, 255]);
+        let mut texture = bytes_u32(&[0xdbc0_1002, 2, 2, 1]);
+        texture.extend_from_slice(&floats(&[1.0, 0.0, 0.0, 1.0, 3.0, 4.0]));
+        texture.extend_from_slice(&image);
+        let mut rect = bytes_u32(&[0, 1]);
+        rect.extend_from_slice(&floats(&[0.0, 0.0, 20.0, 20.0]));
+        let data = stream(
+            false,
+            &[record(OBJECT, 0x0100, texture), record(FILL_RECTS, 0, rect)],
+        );
+        let (svg, diagnostics) = render(&data, false).unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            svg.contains("<pattern id=\"paint0\"") && svg.contains("matrix(1 0 0 1 3 4)"),
+            "{svg}"
+        );
+        assert_eq!(svg, render(&data, false).unwrap().0);
+    }
+
+    #[test]
+    fn recursive_boolean_region_is_retained_as_a_mask() {
+        let mut region = bytes_u32(&[0xdbc0_1002, 2, 2, 0x1000_0000]);
+        region.extend_from_slice(&floats(&[0.0, 0.0, 20.0, 20.0]));
+        region.extend_from_slice(&0x1000_0000u32.to_le_bytes());
+        region.extend_from_slice(&floats(&[30.0, 0.0, 20.0, 20.0]));
+        let mut rect = bytes_u32(&[0xffff_0000, 1]);
+        rect.extend_from_slice(&floats(&[0.0, 0.0, 100.0, 100.0]));
+        let data = stream(
+            false,
+            &[
+                record(OBJECT, 0x0400, region),
+                record(SET_CLIP_REGION, 0, Vec::new()),
+                record(FILL_RECTS, 0x8000, rect),
+            ],
+        );
+        let (svg, diagnostics) = render(&data, false).unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            svg.contains("<mask id=\"mask") && svg.contains("mask=\"url(#mask"),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn gradient_blend_factors_become_color_stops() {
+        let mut gradient = bytes_u32(&[0xdbc0_1002, 4, 8, 0]);
+        gradient.extend_from_slice(&floats(&[0.0, 0.0, 100.0, 0.0]));
+        gradient.extend_from_slice(&bytes_u32(&[0xffff_0000, 0xff00_00ff, 0, 0, 3]));
+        gradient.extend_from_slice(&floats(&[0.0, 0.5, 1.0, 0.0, 0.5, 1.0]));
+        let paint = parse_brush(&gradient, &ResourceLimits::default(), dummy_record()).unwrap();
+        let Paint::LinearGradient { stops, .. } = paint else {
+            panic!("not a gradient")
+        };
+        assert_eq!(stops.len(), 3);
+        assert_eq!(stops[0].color, argb(0xff00_00ff));
+        assert_eq!(stops[2].color, argb(0xffff_0000));
+    }
+
+    #[test]
+    fn curve_records_render_cardinal_splines_as_cubics() {
+        let pen = record(OBJECT, 0x0200, pen(0xff00_0000, 1.0, 0, &[]));
+        let mut curve = floats(&[0.5]);
+        curve.extend_from_slice(&bytes_u32(&[0, 3, 4]));
+        curve.extend_from_slice(&floats(&[0.0, 0.0, 20.0, 0.0, 20.0, 20.0, 40.0, 20.0]));
+        let (svg, diagnostics) =
+            render(&stream(false, &[pen, record(DRAW_CURVE, 0, curve)]), false).unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(
+            svg.contains("M 0 0 C") && svg.matches(" C ").count() == 3,
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn affine_draw_string_uses_a_full_text_matrix() {
+        let family: Vec<u8> = "Arial".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut font = bytes_u32(&[0xdbc0_1002]);
+        font.extend_from_slice(&12f32.to_le_bytes());
+        font.extend_from_slice(&bytes_u32(&[2, 0, 0, 5]));
+        font.extend_from_slice(&family);
+        let mut draw = bytes_u32(&[0xff00_0000, u32::MAX, 1]);
+        draw.extend_from_slice(&floats(&[10.0, 20.0, 0.0, 0.0]));
+        draw.extend_from_slice(&('A' as u16).to_le_bytes());
+        let transform = record(
+            SET_WORLD_TRANSFORM,
+            0,
+            floats(&[0.0, 1.0, -1.0, 0.0, 50.0, 5.0]),
+        );
+        let (svg, _) = render(
+            &stream(
+                false,
+                &[
+                    record(OBJECT, 0x0601, font),
+                    transform,
+                    record(DRAW_STRING, 0x8001, draw),
+                ],
+            ),
+            false,
+        )
+        .unwrap();
+        assert!(svg.contains("transform=\"matrix(0 1 -1 0 50 5)\""), "{svg}");
+    }
+
+    #[test]
+    fn full_image_point_placement_uses_pixel_centres() {
+        let placement = inset_bitmap_placement(
+            BitmapPlacement {
+                origin: Point::new(320.0, 35.0),
+                x_axis: Vector::new(240.0, 35.0),
+                y_axis: Vector::new(-30.0, 185.0),
+            },
+            8,
+            6,
+        );
+        assert!((placement.origin.x - 332.5).abs() < 1e-9);
+        assert!((placement.origin.y - 52.604_166_666_7).abs() < 1e-9);
+        assert_eq!(placement.x_axis, Vector::new(210.0, 30.625));
+        assert!((placement.y_axis.x + 25.0).abs() < 1e-9);
+        assert!((placement.y_axis.y - 154.166_666_666_7).abs() < 1e-9);
     }
 }

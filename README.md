@@ -5,9 +5,8 @@ Metafiles and rendering deterministic, self-contained SVG. It targets native
 Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
 converters, browser Canvas, or remote services.
 
-This release establishes substantial WMF and ordinary-EMF support plus an
-initial, deliberately bounded EMF+ parser and playback engine. It is not a
-claim of complete Windows GDI/GDI+ compatibility.
+This release establishes substantial WMF, ordinary-EMF, and common EMF+
+playback. It is not a claim of complete Windows GDI/GDI+ compatibility.
 
 The intended 1.0 engine supports WMF, ordinary EMF, and EMF+ through the same
 first-party native/WASM byte-to-SVG API with structured diagnostics. After it
@@ -49,7 +48,7 @@ level consumers can call `metafile_wmf::playback` with any
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
 | Ordinary EMF | Partial | Validated headers, world/mapping transforms, common vectors/paths, transformed polygon/path clips, Unicode/ANSI text, and affine BI_RGB StretchDIBits are rendered. Arbitrary-affine text and non-uniform geometric pens remain explicit approximations. See `docs/emf-record-audit.md`. |
-| EMF+ | Initial subset | EMF+ Only and Dual streams use dedicated playback for common objects, vector paths, transforms/state, basic clipping, raw ARGB bitmaps, and DrawString. Unsupported features are diagnostic or strict errors; the ordinary-EMF Dual fallback is never silently substituted. |
+| EMF+ | Common document subset | EMF+ Only and Dual streams use dedicated playback for vectors/paths, state and affine transforms, boolean regions, Unicode text, PNG/JPEG/raw images, textures, and linear gradients. Text metrics and selected layout behavior are approximate. Path gradients and advanced pens remain explicit P2 gaps; the ordinary-EMF Dual fallback is never silently substituted. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
 permissive mode. In strict mode, an unknown operation or a known operation

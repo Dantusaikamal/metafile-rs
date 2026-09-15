@@ -2,9 +2,9 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{
-    ArcKind, Bitmap, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipRegion, Color,
-    HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Paint, Path, PathSegment, Pen,
-    PenStyle, Point, Rect, Renderer, ResourceLimits, Result, Stroke, TextRun,
+    ArcKind, Bitmap, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipOperation, ClipRegion,
+    Color, HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Paint, Path, PathSegment,
+    Pen, PenStyle, Point, Rect, Renderer, ResourceLimits, Result, Stroke, TextRun,
     VerticalTextAlignment,
 };
 use std::collections::BTreeMap;
@@ -17,6 +17,8 @@ pub struct SvgRenderer {
     bounds: Option<Rect>,
     next_clip_id: u32,
     clip_ids: BTreeMap<String, u32>,
+    next_mask_id: u32,
+    mask_ids: BTreeMap<String, u32>,
     next_paint_id: u32,
     paint_ids: BTreeMap<String, u32>,
     output_bytes: usize,
@@ -32,6 +34,8 @@ impl SvgRenderer {
             bounds: None,
             next_clip_id: 0,
             clip_ids: BTreeMap::new(),
+            next_mask_id: 0,
+            mask_ids: BTreeMap::new(),
             next_paint_id: 0,
             paint_ids: BTreeMap::new(),
             output_bytes: 0,
@@ -139,8 +143,80 @@ impl SvgRenderer {
         let Some(region) = clip else {
             return String::new();
         };
-        let id = self.ensure_clip_id(region);
-        format!(" clip-path=\"url(#clip{id})\"")
+        if clip_has_boolean(region) {
+            let id = self.ensure_mask_id(region);
+            format!(" mask=\"url(#mask{id})\"")
+        } else {
+            let id = self.ensure_clip_id(region);
+            format!(" clip-path=\"url(#clip{id})\"")
+        }
+    }
+
+    fn ensure_mask_id(&mut self, region: &ClipRegion) -> u32 {
+        let key = clip_key(region);
+        if let Some(id) = self.mask_ids.get(&key) {
+            return *id;
+        }
+        let id = self.next_mask_id;
+        self.next_mask_id += 1;
+        self.mask_ids.insert(key, id);
+        let mask_bounds = clip_region_bounds(region).unwrap_or(Rect {
+            left: -f64::from(self.limits.max_dimension),
+            top: -f64::from(self.limits.max_dimension),
+            right: f64::from(self.limits.max_dimension),
+            bottom: f64::from(self.limits.max_dimension),
+        });
+        let canvas = |fill| mask_rect(mask_bounds, fill);
+        let body = match region {
+            ClipRegion::Intersection(regions) => {
+                let mut body = canvas("white");
+                for region in regions {
+                    let child = self.ensure_mask_id(region);
+                    body = format!("<g mask=\"url(#mask{child})\">{body}</g>");
+                }
+                body
+            }
+            ClipRegion::Combine {
+                operation,
+                left,
+                right,
+            } => {
+                let left_id = self.ensure_mask_id(left);
+                let right_id = self.ensure_mask_id(right);
+                match operation {
+                    ClipOperation::Union => format!(
+                        "<g mask=\"url(#mask{left_id})\">{}</g><g mask=\"url(#mask{right_id})\">{}</g>",
+                        canvas("white"), canvas("white")
+                    ),
+                    ClipOperation::Exclude | ClipOperation::Complement => {
+                        let (include, subtract) = if *operation == ClipOperation::Complement {
+                            (right_id, left_id)
+                        } else {
+                            (left_id, right_id)
+                        };
+                        format!(
+                            "<g mask=\"url(#mask{include})\">{}<g mask=\"url(#mask{subtract})\">{}</g></g>",
+                            canvas("white"), canvas("black")
+                        )
+                    }
+                    ClipOperation::Xor => format!(
+                        "<g mask=\"url(#mask{left_id})\">{}</g><g mask=\"url(#mask{right_id})\">{}</g><g mask=\"url(#mask{left_id})\"><g mask=\"url(#mask{right_id})\">{}</g></g>",
+                        canvas("white"), canvas("white"), canvas("black")
+                    ),
+                }
+            }
+            _ => format!(
+                "{}<g fill=\"white\">{}</g>",
+                canvas("black"),
+                clip_element(region)
+            ),
+        };
+        let mask_bounds = padded_mask_bounds(mask_bounds);
+        self.definitions.push(format!(
+            "<mask id=\"mask{id}\" maskUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" mask-type=\"luminance\">{body}</mask>",
+            n(mask_bounds.left), n(mask_bounds.top), n(mask_bounds.width()), n(mask_bounds.height())
+        ));
+        id
     }
 
     fn ensure_clip_id(&mut self, region: &ClipRegion) -> u32 {
@@ -184,13 +260,13 @@ impl SvgRenderer {
         id
     }
 
-    fn paint_reference(&mut self, paint: &Paint) -> String {
+    fn paint_reference(&mut self, paint: &Paint) -> Result<String> {
         if let Paint::Solid(color) = paint {
-            return color.css();
+            return Ok(color.css());
         }
         let key = paint_key(paint);
         if let Some(id) = self.paint_ids.get(&key) {
-            return format!("url(#paint{id})");
+            return Ok(format!("url(#paint{id})"));
         }
         let id = self.next_paint_id;
         self.next_paint_id += 1;
@@ -207,10 +283,27 @@ impl SvgRenderer {
                 end,
                 stops,
                 wrap_mode,
-            } => gradient_definition(id, *start, *end, stops, *wrap_mode),
+                transform,
+                gamma_corrected,
+            } => gradient_definition(
+                id,
+                *start,
+                *end,
+                stops,
+                *wrap_mode,
+                *transform,
+                *gamma_corrected,
+            ),
+            Paint::Texture {
+                bitmap,
+                transform,
+                wrap_mode,
+                opacity,
+                ..
+            } => texture_definition(id, bitmap, *transform, *wrap_mode, *opacity)?,
         };
         self.definitions.push(definition);
-        format!("url(#paint{id})")
+        Ok(format!("url(#paint{id})"))
     }
 }
 
@@ -404,21 +497,22 @@ impl Renderer for SvgRenderer {
         if points.is_empty() {
             return Ok(());
         }
-        let fill = fill.map_or_else(|| "none".into(), |paint| self.paint_reference(paint));
-        let (stroke_paint, stroke_width, cap, join, miter, dash, dash_offset) = stroke.map_or_else(
-            || {
-                (
-                    "none".into(),
-                    0.0,
-                    "butt",
-                    "miter",
-                    4.0,
-                    String::new(),
-                    String::new(),
-                )
-            },
-            |stroke| {
-                let paint = self.paint_reference(&stroke.paint);
+        let fill = match fill {
+            Some(paint) => self.paint_reference(paint)?,
+            None => "none".into(),
+        };
+        let (stroke_paint, stroke_width, cap, join, miter, dash, dash_offset) = match stroke {
+            None => (
+                "none".into(),
+                0.0,
+                "butt",
+                "miter",
+                4.0,
+                String::new(),
+                String::new(),
+            ),
+            Some(stroke) => {
+                let paint = self.paint_reference(&stroke.paint)?;
                 let cap = match stroke.line_cap {
                     LineCap::Butt => "butt",
                     LineCap::Round => "round",
@@ -451,8 +545,8 @@ impl Renderer for SvgRenderer {
                     dash.unwrap_or_default(),
                     dash_offset.unwrap_or_default(),
                 )
-            },
-        );
+            }
+        };
         let rule = if fill_mode == 2 { "nonzero" } else { "evenodd" };
         let clip = self.clip_attr(clip);
         let bounds = stroke.map_or_else(
@@ -634,9 +728,9 @@ impl Renderer for SvgRenderer {
             (false, true) => "line-through",
             _ => "none",
         };
-        let transform = if run.font.escapement_tenths != 0 {
+        let local_rotation = if run.font.escapement_tenths != 0 {
             format!(
-                " transform=\"rotate({} {} {})\"",
+                " rotate({} {} {})",
                 n(-f64::from(run.font.escapement_tenths) / 10.0),
                 n(run.position.x),
                 n(run.position.y)
@@ -644,10 +738,42 @@ impl Renderer for SvgRenderer {
         } else {
             String::new()
         };
+        let transform =
+            if run.transform == metafile_core::Transform::IDENTITY && local_rotation.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " transform=\"matrix({} {} {} {} {} {}){}\"",
+                    n(run.transform.m11),
+                    n(run.transform.m12),
+                    n(run.transform.m21),
+                    n(run.transform.m22),
+                    n(run.transform.dx),
+                    n(run.transform.dy),
+                    local_rotation
+                )
+            };
         let clip = self.clip_attr(run.clip.as_ref());
         let size = run.font.height.abs().max(1.0);
+        let line_count = run.text.lines().count().max(1);
+        let line_advance = size * 1.2;
+        let first_line_offset = match run.vertical_align {
+            VerticalTextAlignment::Center => {
+                -((line_count.saturating_sub(1)) as f64 * line_advance) / 2.0
+            }
+            VerticalTextAlignment::Bottom => {
+                -((line_count.saturating_sub(1)) as f64) * line_advance
+            }
+            VerticalTextAlignment::Top | VerticalTextAlignment::Baseline => 0.0,
+        };
         let estimated_width = if run.dx.is_empty() {
-            size * run.text.chars().count() as f64 * 0.6
+            size * run
+                .text
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0) as f64
+                * 0.6
         } else {
             run.dx.iter().sum::<f64>().abs()
         };
@@ -660,11 +786,17 @@ impl Renderer for SvgRenderer {
             HorizontalTextAlignment::Right => (run.position.x - estimated_width, run.position.x),
         };
         let (text_top, text_bottom) = match run.vertical_align {
-            VerticalTextAlignment::Top => (run.position.y, run.position.y + size),
-            VerticalTextAlignment::Center => {
-                (run.position.y - size / 2.0, run.position.y + size / 2.0)
+            VerticalTextAlignment::Top => {
+                (run.position.y, run.position.y + size * line_count as f64)
             }
-            VerticalTextAlignment::Bottom => (run.position.y - size, run.position.y),
+            VerticalTextAlignment::Center => {
+                let height = size + (line_count.saturating_sub(1)) as f64 * line_advance;
+                (run.position.y - height / 2.0, run.position.y + height / 2.0)
+            }
+            VerticalTextAlignment::Bottom => (
+                run.position.y - size - (line_count.saturating_sub(1)) as f64 * line_advance,
+                run.position.y,
+            ),
             VerticalTextAlignment::Baseline => {
                 (run.position.y - size * 0.8, run.position.y + size * 0.2)
             }
@@ -675,6 +807,7 @@ impl Renderer for SvgRenderer {
             right: text_right,
             bottom: text_bottom,
         };
+        let output_bounds = transformed_rect_bounds(estimated_bounds, run.transform);
         if let (Some(bg), Some(background_path)) = (run.background, run.background_path.as_ref()) {
             let data = path_data(background_path)?;
             let bounds = path_bounds(background_path)?;
@@ -708,11 +841,33 @@ impl Renderer for SvgRenderer {
                     n(estimated_bounds.height()),
                     bg.css()
                 ),
-                estimated_bounds,
+                output_bounds,
             )?;
         }
         let (content, text_x, effective_anchor) = if run.dx.is_empty() {
-            (xml(&run.text), run.position.x, anchor)
+            let content = if run.text.contains('\n') {
+                run.text
+                    .lines()
+                    .enumerate()
+                    .fold(String::new(), |mut output, (index, line)| {
+                        let dy = if index == 0 {
+                            n(first_line_offset)
+                        } else {
+                            n(line_advance)
+                        };
+                        write!(
+                            output,
+                            "<tspan x=\"{}\" dy=\"{dy}\">{}</tspan>",
+                            n(run.position.x),
+                            xml(line)
+                        )
+                        .expect("writing to String cannot fail");
+                        output
+                    })
+            } else {
+                xml(&run.text)
+            };
+            (content, run.position.x, anchor)
         } else {
             let total: f64 = run.dx.iter().sum();
             let start_x = match run.horizontal_align {
@@ -735,7 +890,17 @@ impl Renderer for SvgRenderer {
             }
             (spans, start_x, "start")
         };
-        self.push(format!("<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{effective_anchor}\" dominant-baseline=\"{baseline}\"{transform}{clip}>{content}</text>",n(text_x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"}),estimated_bounds)
+        let direction = if run.right_to_left {
+            " direction=\"rtl\" unicode-bidi=\"bidi-override\""
+        } else {
+            ""
+        };
+        let (open, text_clip, close) = if transform.is_empty() {
+            (String::new(), clip, String::new())
+        } else {
+            (format!("<g{clip}>"), String::new(), "</g>".into())
+        };
+        self.push(format!("{open}<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-decoration=\"{decoration}\" text-anchor=\"{effective_anchor}\" dominant-baseline=\"{baseline}\"{direction}{transform}{text_clip}>{content}</text>{close}",n(text_x),n(run.position.y),run.color.css(),xml(&run.font.family),n(size),run.font.weight,if run.font.italic{"italic"}else{"normal"}),output_bounds)
     }
     fn bitmap(
         &mut self,
@@ -805,8 +970,10 @@ fn paint_key(paint: &Paint) -> String {
             end,
             stops,
             wrap_mode,
+            transform,
+            gamma_corrected,
         } => format!(
-            "g:{}:{}:{}:{}:{wrap_mode}:{}",
+            "g:{}:{}:{}:{}:{wrap_mode}:{}:{}:{}:{}:{}:{}:{}:{gamma_corrected}",
             n(start.x),
             n(start.y),
             n(end.x),
@@ -822,7 +989,32 @@ fn paint_key(paint: &Paint) -> String {
                     stop.color.a
                 ))
                 .collect::<Vec<_>>()
-                .join(";")
+                .join(";"),
+            n(transform.m11),
+            n(transform.m12),
+            n(transform.m21),
+            n(transform.m22),
+            n(transform.dx),
+            n(transform.dy)
+        ),
+        Paint::Texture {
+            bitmap,
+            transform,
+            wrap_mode,
+            opacity,
+            do_not_transform,
+        } => format!(
+            "t:{}:{}:{wrap_mode}:{}:{}:{}:{}:{}:{}:{}:{do_not_transform}:{}",
+            bitmap.width,
+            bitmap.height,
+            n(*opacity),
+            n(transform.m11),
+            n(transform.m12),
+            n(transform.m21),
+            n(transform.m22),
+            n(transform.dx),
+            n(transform.dy),
+            STANDARD.encode(&bitmap.rgba)
         ),
     }
 }
@@ -849,6 +1041,8 @@ fn gradient_definition(
     end: Point,
     stops: &[metafile_core::GradientStop],
     wrap_mode: u32,
+    transform: metafile_core::Transform,
+    gamma_corrected: bool,
 ) -> String {
     let spread = match wrap_mode {
         0 => "pad",
@@ -867,12 +1061,81 @@ fn gradient_definition(
         output
     });
     format!(
-        "<linearGradient id=\"paint{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" spreadMethod=\"{spread}\">{stops}</linearGradient>",
+        "<linearGradient id=\"paint{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" spreadMethod=\"{spread}\" color-interpolation=\"{}\" gradientTransform=\"matrix({} {} {} {} {} {})\">{stops}</linearGradient>",
         n(start.x),
         n(start.y),
         n(end.x),
-        n(end.y)
+        n(end.y),
+        if gamma_corrected { "linearRGB" } else { "sRGB" },
+        n(transform.m11),
+        n(transform.m12),
+        n(transform.m21),
+        n(transform.m22),
+        n(transform.dx),
+        n(transform.dy)
     )
+}
+
+fn texture_definition(
+    id: u32,
+    bitmap: &Bitmap,
+    transform: metafile_core::Transform,
+    wrap_mode: u32,
+    opacity: f64,
+) -> Result<String> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, bitmap.width, bitmap.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+        writer
+            .write_image_data(&bitmap.rgba)
+            .map_err(|error| MetafileError::SvgGeneration(error.to_string()))?;
+    }
+    let (width, height) = match wrap_mode {
+        1 => (bitmap.width.saturating_mul(2), bitmap.height),
+        2 => (bitmap.width, bitmap.height.saturating_mul(2)),
+        3 => (
+            bitmap.width.saturating_mul(2),
+            bitmap.height.saturating_mul(2),
+        ),
+        _ => (bitmap.width, bitmap.height),
+    };
+    let encoded = STANDARD.encode(bytes);
+    let image = |extra: &str| {
+        format!(
+        "<image width=\"{}\" height=\"{}\" opacity=\"{}\" href=\"data:image/png;base64,{encoded}\"{extra}/>",
+        bitmap.width, bitmap.height, n(opacity.clamp(0.0, 1.0))
+    )
+    };
+    let mut images = image("");
+    if wrap_mode == 1 || wrap_mode == 3 {
+        images.push_str(&image(&format!(
+            " transform=\"translate({} 0) scale(-1 1)\"",
+            bitmap.width.saturating_mul(2)
+        )));
+    }
+    if wrap_mode == 2 || wrap_mode == 3 {
+        images.push_str(&image(&format!(
+            " transform=\"translate(0 {}) scale(1 -1)\"",
+            bitmap.height.saturating_mul(2)
+        )));
+    }
+    if wrap_mode == 3 {
+        images.push_str(&image(&format!(
+            " transform=\"translate({} {}) scale(-1 -1)\"",
+            bitmap.width.saturating_mul(2),
+            bitmap.height.saturating_mul(2)
+        )));
+    }
+    Ok(format!(
+        "<pattern id=\"paint{id}\" patternUnits=\"userSpaceOnUse\" width=\"{width}\" height=\"{height}\" patternTransform=\"matrix({} {} {} {} {} {})\">{images}</pattern>",
+        n(transform.m11), n(transform.m12), n(transform.m21), n(transform.m22),
+        n(transform.dx), n(transform.dy)
+    ))
 }
 
 fn path_points(path: &Path) -> Vec<Point> {
@@ -984,6 +1247,62 @@ fn flatten_clip_regions<'a>(regions: &'a [ClipRegion], output: &mut Vec<&'a Clip
     }
 }
 
+fn clip_has_boolean(region: &ClipRegion) -> bool {
+    match region {
+        ClipRegion::Combine { .. } => true,
+        ClipRegion::Intersection(regions) => regions.iter().any(clip_has_boolean),
+        _ => false,
+    }
+}
+
+fn mask_rect(bounds: Rect, fill: &str) -> String {
+    let bounds = padded_mask_bounds(bounds);
+    format!(
+        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{fill}\"/>",
+        n(bounds.left),
+        n(bounds.top),
+        n(bounds.width()),
+        n(bounds.height())
+    )
+}
+
+fn padded_mask_bounds(bounds: Rect) -> Rect {
+    let bounds = bounds.normalized();
+    Rect {
+        left: bounds.left - 1.0,
+        top: bounds.top - 1.0,
+        right: bounds.right + 1.0,
+        bottom: bounds.bottom + 1.0,
+    }
+}
+
+fn clip_region_bounds(region: &ClipRegion) -> Option<Rect> {
+    match region {
+        ClipRegion::Rect(rect) => Some(rect.normalized()),
+        ClipRegion::Polygon(points) => (!points.is_empty()).then(|| points_bounds(points)),
+        ClipRegion::Path { path, .. } => path_bounds(path).ok(),
+        ClipRegion::Intersection(regions) => {
+            let mut bounds = regions.iter().filter_map(clip_region_bounds);
+            let first = bounds.next()?;
+            bounds.try_fold(first, Rect::intersection)
+        }
+        ClipRegion::Combine {
+            operation,
+            left,
+            right,
+        } => match operation {
+            ClipOperation::Union | ClipOperation::Xor => {
+                match (clip_region_bounds(left), clip_region_bounds(right)) {
+                    (Some(left), Some(right)) => Some(left.union(right)),
+                    (bounds, None) | (None, bounds) => bounds,
+                }
+            }
+            ClipOperation::Exclude => clip_region_bounds(left),
+            ClipOperation::Complement => clip_region_bounds(right),
+        },
+    }
+}
+
 fn clip_key(region: &ClipRegion) -> String {
     match region {
         ClipRegion::Rect(rect) => {
@@ -1008,6 +1327,13 @@ fn clip_key(region: &ClipRegion) -> String {
                 .map(clip_key)
                 .collect::<Vec<_>>()
                 .join("&")
+        }
+        ClipRegion::Combine {
+            operation,
+            left,
+            right,
+        } => {
+            format!("b:{operation:?}:{}:{}", clip_key(left), clip_key(right))
         }
     }
 }
@@ -1037,6 +1363,7 @@ fn clip_element(region: &ClipRegion) -> String {
             }
         ),
         ClipRegion::Intersection(_) => String::new(),
+        ClipRegion::Combine { .. } => String::new(),
     }
 }
 
@@ -1117,6 +1444,16 @@ fn points_bounds(p: &[Point]) -> Rect {
     }
     r
 }
+
+fn transformed_rect_bounds(rect: Rect, transform: metafile_core::Transform) -> Rect {
+    let points = [
+        transform.transform_point(Point::new(rect.left, rect.top)),
+        transform.transform_point(Point::new(rect.right, rect.top)),
+        transform.transform_point(Point::new(rect.right, rect.bottom)),
+        transform.transform_point(Point::new(rect.left, rect.bottom)),
+    ];
+    points_bounds(&points)
+}
 fn stroke_bounds(rect: Rect, pen: &Pen) -> Rect {
     if pen.style == PenStyle::Null {
         return rect;
@@ -1162,6 +1499,8 @@ mod tests {
             vertical_align: VerticalTextAlignment::Top,
             clip: None,
             dx: vec![],
+            transform: metafile_core::Transform::IDENTITY,
+            right_to_left: false,
         })
         .unwrap();
         let s = r.finish(None, None).unwrap();
@@ -1246,5 +1585,70 @@ mod tests {
             .unwrap();
         let svg = renderer.finish(None, None).unwrap();
         assert!(svg.contains("d=\"M 1 2 C 3 4 5 6 7 8 Z\""), "{svg}");
+    }
+
+    #[test]
+    fn multiline_centering_offsets_the_first_baseline() {
+        let mut renderer = SvgRenderer::new(ResourceLimits::default());
+        let font = metafile_core::Font {
+            height: 10.0,
+            ..metafile_core::Font::default()
+        };
+        renderer
+            .text(&TextRun {
+                position: Point::new(50.0, 50.0),
+                text: "first\nsecond".into(),
+                font,
+                color: Color::BLACK,
+                background: None,
+                background_rect: None,
+                background_path: None,
+                horizontal_align: HorizontalTextAlignment::Center,
+                vertical_align: VerticalTextAlignment::Center,
+                clip: None,
+                dx: Vec::new(),
+                transform: metafile_core::Transform::IDENTITY,
+                right_to_left: false,
+            })
+            .unwrap();
+        let svg = renderer.finish(None, None).unwrap();
+        assert!(
+            svg.contains("<tspan x=\"50\" dy=\"-6\">first</tspan>"),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<tspan x=\"50\" dy=\"12\">second</tspan>"),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn boolean_clip_masks_use_region_derived_bounds() {
+        let clip = ClipRegion::Combine {
+            operation: ClipOperation::Exclude,
+            left: Box::new(ClipRegion::Rect(Rect {
+                left: 10.0,
+                top: 20.0,
+                right: 110.0,
+                bottom: 120.0,
+            })),
+            right: Box::new(ClipRegion::Rect(Rect {
+                left: 40.0,
+                top: 50.0,
+                right: 80.0,
+                bottom: 90.0,
+            })),
+        };
+        let mut renderer = SvgRenderer::new(ResourceLimits::default());
+        renderer
+            .pixel(Point::new(20.0, 30.0), Color::BLACK, Some(&clip))
+            .unwrap();
+        let svg = renderer.finish(None, None).unwrap();
+        assert!(svg.contains("mask=\"url(#mask0)\""), "{svg}");
+        assert!(
+            svg.contains("x=\"9\" y=\"19\" width=\"102\" height=\"102\""),
+            "{svg}"
+        );
+        assert!(!svg.contains("32768"), "{svg}");
     }
 }

@@ -395,6 +395,15 @@ pub enum Paint {
         end: Point,
         stops: Vec<GradientStop>,
         wrap_mode: u32,
+        transform: Transform,
+        gamma_corrected: bool,
+    },
+    Texture {
+        bitmap: Bitmap,
+        transform: Transform,
+        wrap_mode: u32,
+        opacity: f64,
+        do_not_transform: bool,
     },
 }
 
@@ -408,6 +417,8 @@ pub struct GradientStop {
 pub struct Stroke {
     pub paint: Paint,
     pub width: f64,
+    /// GDI+ `UnitType` for the pen width (Pixel by default).
+    pub unit: u32,
     pub line_cap: LineCap,
     pub line_join: LineJoin,
     pub miter_limit: f64,
@@ -654,6 +665,9 @@ pub struct TextRun {
     pub vertical_align: VerticalTextAlignment,
     pub clip: Option<ClipRegion>,
     pub dx: Vec<f64>,
+    /// Maps local text coordinates into output coordinates.
+    pub transform: Transform,
+    pub right_to_left: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -684,8 +698,24 @@ pub struct Bitmap {
 pub enum ClipRegion {
     Rect(Rect),
     Polygon(Vec<Point>),
-    Path { path: Path, fill_mode: u16 },
+    Path {
+        path: Path,
+        fill_mode: u16,
+    },
     Intersection(Vec<ClipRegion>),
+    Combine {
+        operation: ClipOperation,
+        left: Box<ClipRegion>,
+        right: Box<ClipRegion>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipOperation {
+    Union,
+    Xor,
+    Exclude,
+    Complement,
 }
 
 impl ClipRegion {
@@ -696,6 +726,15 @@ impl ClipRegion {
             Self::Polygon(points) => points.len() < 3,
             Self::Path { path, .. } => path.figures.is_empty(),
             Self::Intersection(regions) => regions.is_empty() || regions.iter().any(Self::is_empty),
+            Self::Combine {
+                operation,
+                left,
+                right,
+            } => match operation {
+                ClipOperation::Union | ClipOperation::Xor => left.is_empty() && right.is_empty(),
+                ClipOperation::Exclude => left.is_empty(),
+                ClipOperation::Complement => right.is_empty(),
+            },
         }
     }
 }

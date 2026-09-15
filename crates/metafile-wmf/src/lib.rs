@@ -655,6 +655,8 @@ impl Player {
                                 .x
                         })
                         .collect(),
+                    transform: metafile_core::Transform::IDENTITY,
+                    right_to_left: false,
                 };
                 r.text(&run)?;
                 if self.dc.text_align & 0x0001 != 0 {
@@ -864,7 +866,10 @@ impl Player {
                 bottom: b.top,
             }),
             Some(
-                ClipRegion::Polygon(_) | ClipRegion::Path { .. } | ClipRegion::Intersection(_),
+                ClipRegion::Polygon(_)
+                | ClipRegion::Path { .. }
+                | ClipRegion::Intersection(_)
+                | ClipRegion::Combine { .. },
             ) => {
                 unreachable!("WMF only creates rectangular clips")
             }

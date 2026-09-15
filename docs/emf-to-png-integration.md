@@ -17,6 +17,11 @@ diagnostics. `emf-to-png` continues to own Node `Buffer`, filesystem access,
 requested output dimensions, fit, DPI policy, background compositing,
 PNG/JPEG encoding, fallback images, logging, and CLI behavior.
 
+The byte-to-SVG integration surface is frozen for the converter pass. Current
+P2 fidelity gaps (notably EMF+ path gradients, custom/compound pen caps, and
+exact Windows text shaping) remain structured diagnostics/strict errors and do
+not require exposing parser internals to JavaScript.
+
 ## API mapping
 
 - `inspect()` calls `inspectMetafile(Uint8Array)` and maps the stable structured

@@ -1892,6 +1892,8 @@ impl Player {
             },
             clip: combine_clip(self.clip(), option_clip),
             dx: dx.clone(),
+            transform: metafile_core::Transform::IDENTITY,
+            right_to_left: false,
         };
         renderer.text(&run)?;
         if self.dc.core.text_align & 1 != 0 {
@@ -2315,9 +2317,14 @@ fn combine_clip(a: Option<&ClipRegion>, b: Option<ClipRegion>) -> Option<ClipReg
                 ],
             ))
         }
-        (Some(a), Some(b @ (ClipRegion::Path { .. } | ClipRegion::Intersection(_)))) => {
-            Some(intersect_regions(a.clone(), b))
-        }
+        (
+            Some(a),
+            Some(
+                b @ (ClipRegion::Path { .. }
+                | ClipRegion::Intersection(_)
+                | ClipRegion::Combine { .. }),
+            ),
+        ) => Some(intersect_regions(a.clone(), b)),
         (Some(a), None) => Some(a.clone()),
         (None, Some(b)) => Some(b),
         (None, None) => None,
@@ -2405,7 +2412,7 @@ fn intersect_clip_polygon(current: &ClipRegion, incoming: &[Point]) -> ClipRegio
             ]
         }
         ClipRegion::Polygon(points) => points.clone(),
-        ClipRegion::Path { .. } | ClipRegion::Intersection(_) => {
+        ClipRegion::Path { .. } | ClipRegion::Intersection(_) | ClipRegion::Combine { .. } => {
             return intersect_regions(current.clone(), ClipRegion::Polygon(incoming.to_vec()));
         }
     };

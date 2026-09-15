@@ -7,7 +7,7 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 | --- | --- | --- | --- | --- |
 | WMF | Common document subset implemented and regression-tested | Project-owned matrix previously qualified; current hosted run pending | Missing | READY WITH DOCUMENTED LIMITATIONS |
 | ordinary EMF | Common vectors/state/text/BI_RGB implemented and regression-tested | Project-owned matrix previously qualified; current hosted run pending | Missing | READY WITH DOCUMENTED LIMITATIONS |
-| EMF+ | Initial P0 subset; known P1 features remain unsupported | Expanded matrix not yet proven green | Missing | NOT READY |
+| EMF+ | Common vectors/state/text/images/brushes/regions implemented; explicit P2 gaps remain | Seven project-owned GDI+ cases pass locally | Missing | READY WITH DOCUMENTED LIMITATIONS; hosted verification pending |
 
 - [ ] GitHub CI green on Linux, macOS, and Windows for these qualification changes (the base commit was green)
 - [x] Rust 1.88 MSRV commands pass locally
@@ -31,7 +31,9 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 - [x] structured WASM error contract exercised at runtime
 - [x] initial EMF+ Only and Dual streams inspect and render through dedicated playback
 - [x] EMF+ object/record framing, continuation, transform, clip, text, and bitmap regressions are bounded
-- [ ] broad EMF+ Windows GDI+ reference matrix passes
+- [x] seven-case EMF+ Windows GDI+ reference matrix passes locally (Only,
+  Dual, vectors/texture/curves, PNG/JPEG/images, transformed text, boolean
+  regions/gradient, and state/container/path)
 - [ ] independently sourced Office/DOCX EMF+ corpus populated
 - [x] README compatibility table reviewed against implementation
 - [x] production dependency purposes documented
@@ -39,15 +41,17 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 - [x] no external EMF renderer or converter dependency
 - [x] workspace forbids unsafe Rust
 
-See `qualification-2026-09-11.md`, `qualification-2026-09-12-emf.md`, and
-`qualification-2026-09-14-foundation.md` for exact evidence and blockers. The public
-facade now uses a format-neutral metadata envelope. Release remains blocked on
-independently sourced Word/DOCX WMF and EMF files, remaining edge-case
-arc/inversion evidence, and GitHub-hosted CI confirmation for this change.
+See `qualification-2026-09-11.md`, `qualification-2026-09-12-emf.md`,
+`qualification-2026-09-14-foundation.md`, and
+`qualification-2026-09-15-emfplus.md` for exact evidence and blockers. The
+public facade uses a format-neutral metadata envelope. Publishing remains blocked
+on GitHub-hosted CI confirmation for this change. Independent Office corpus
+gates remain unverified qualification work, not fabricated release evidence.
 
 The controlled local DOCX extraction workflow has been exercised with WMF,
 ordinary EMF, and EMF+ media. It validates discovery, hashing, and
 classification, but project-controlled data does not satisfy either independent
-Office corpus gate. Initial EMF+ playback is reviewable but is not yet a
-production-readiness claim; richer brushes, images, regions, text layout, and
-the GDI+ reference matrix remain release blockers.
+Office corpus gate. Common EMF+ playback now has project-owned Windows GDI+
+differential evidence. PathGradient, advanced/custom pen behavior, exact text
+shaping, and uncommon image effects remain explicit P2 compatibility work
+rather than silent fallbacks. See `emfplus-record-audit.md` for the boundary.

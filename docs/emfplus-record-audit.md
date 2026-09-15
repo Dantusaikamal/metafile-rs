@@ -1,63 +1,82 @@
 # EMF+ record audit
 
-This audit describes playback, not merely parsing. EMF+ is an initial subset;
-unsupported semantics are diagnosed in permissive mode and rejected in strict
-mode. EMF+ Dual always uses the EMF+ stream, never an implicit classic-EMF
-fallback.
+This audit describes playback, not merely parsing. Unsupported semantics are
+diagnosed in permissive mode and rejected in strict mode when used. Unsupported
+object definitions retain their object-table slots and do not fail unless a
+visible record selects them. EMF+ Dual uses its EMF+ stream; the classic EMF
+fallback is never silently substituted.
 
-## Rendered
+## Implemented and rendered
 
-- framing: Header, EndOfFile, object continuation/replacement;
-- state: Save/Restore, Begin/EndContainer, page/world transform set/reset,
-  multiply, translate, scale, and rotate;
+- framing: Header, EndOfFile, object continuation/replacement, and correct
+  EMF+ Only versus Dual classification from the Header record D flag;
+- state: Save/Restore, Begin/EndContainer (including source units), page/world
+  transform set/reset/multiply/translate/scale/rotate, and non-commutative
+  transform ordering;
 - vectors: Clear, Fill/DrawRects, FillPolygon, DrawLines, DrawBeziers,
-  Fill/DrawEllipse, Fill/DrawPie, DrawArc, Fill/DrawPath;
-- objects: solid and common hatch/linear-gradient brushes, common pens, paths,
-  simple rectangular regions, raw ARGB bitmaps, fonts, and basic StringFormat;
-- clipping: reset, rectangular/path/simple-region replacement or intersection,
-  and offset;
-- images: DrawImage and DrawImagePoints with integral-pixel source cropping and
-  affine destination placement for supported raw bitmaps;
-- text: DrawString Unicode content, family, size/style, and horizontal/vertical
-  layout alignment.
+  Fill/DrawEllipse, Fill/DrawPie, DrawArc, Fill/DrawPath, DrawCurve,
+  DrawClosedCurve, and FillClosedCurve;
+- objects: solid/hatch/linear-gradient/texture brushes, common pens, paths,
+  recursive RegionNode trees, raw and encoded bitmaps, fonts, StringFormat,
+  and the serialized ImageAttributes wrap/clamp object;
+- clipping: reset, offset, path/rectangle/region clipping, and Replace,
+  Intersect, Union, Exclude, Complement, and XOR boolean combinations;
+- images: raw 24/32-bit pixels plus PNG and JPEG, integral source crop,
+  affine DrawImagePoints placement, mirroring, common interpolation modes,
+  and bounded wrap/clamp sampling;
+- text: Unicode DrawString, family/size/style and unit conversion, horizontal
+  and vertical alignment, NoWrap, deterministic wrapping/trimming, RTL flags,
+  layout clipping, multiline block centering, and full affine transforms;
+- brushes/strokes: deterministic texture patterns and Tile/TileFlip modes,
+  transformed linear gradients, preset colors, one-dimensional blend factors,
+  gamma-correction selection, brush-backed pens, standard equal caps, joins,
+  miter, dash style/pattern/offset, and pen width units.
 
-## Approximate or state-only
+The five project-owned P1 fixtures exercise these paths against Windows GDI+.
+They supplement the original EMF+ Only and Dual fixtures.
 
-- host SVG font selection and metrics are not pixel-identical to Windows GDI+;
-- fractional source-image rectangles expand to whole pixels with a diagnostic;
-- non-solid text paint falls back to a representative color with a diagnostic;
-- rendering quality, compositing, smoothing, interpolation, pixel-offset, and
-  text-rendering modes are retained where useful but do not all have exact SVG
-  equivalents;
-- supported hatch styles use deterministic SVG pattern equivalents rather than
-  promising pixel-identical GDI+ sampling.
+## Approximate, always diagnostic where material
 
-## Explicitly unsupported
+- SVG host fonts and metrics cannot be pixel-identical to Windows GDI+;
+- StringFormat shaping, word-boundary trimming, and several uncommon direction
+  flags use deterministic host-independent approximations;
+- fractional image source rectangles expand to whole pixels;
+- non-solid DrawString paint uses a representative color because the shared
+  text vocabulary does not support painting glyphs with a brush;
+- quality/compositing/smoothing/pixel-offset/text-rendering modes without an
+  exact SVG equivalent are retained and diagnosed;
+- supported hatch styles are deterministic SVG equivalents, not identical GDI+
+  device-pixel patterns.
 
-- texture and path-gradient brushes; advanced linear-gradient blend behavior;
-- advanced pen flags, compound lines, custom caps, and differing start/end caps;
-- boolean region trees beyond simple empty/infinite/rectangle cases;
-- compressed images, non-supported pixel formats, image attributes/color
-  matrices, recursive metafile images, and effects;
-- DrawDriverString, glyph-index/vertical/RTL/trimming/wrapping fidelity;
-- closed curves and other records not listed in the rendered section.
+## Explicitly unsupported (P2 unless corpus evidence promotes them)
 
-Malformed inner headers, sizes, fragments, paths, transforms, images, and
-strings return `InvalidEmfPlus` with outer EMF and inner EMF+ context. Resource
-limits bound comments, records, objects, points, strings, gradients, dash data,
-regions, state/container depth, decoded pixels, diagnostics, and SVG output.
+- PathGradientBrush (parsed as a bounded unsupported object; never replaced by
+  a misleading radial gradient);
+- simultaneous two-dimensional linear-gradient blend factors;
+- texture Clamp edge behavior beyond the supported image-attribute sampling;
+- pen transforms, non-flat dash caps, differing start/end caps, compound lines,
+  custom caps, and adjustable arrows;
+- recursive metafile image objects and encoded image formats other than PNG or
+  JPEG;
+- raw indexed/16-bit EMF+ bitmap layouts;
+- DrawDriverString, glyph-index shaping, vertical scripts, and exact Windows
+  line breaking;
+- effects and unknown visible records.
 
-## Qualification status
+The serialized MS-EMFPLUS ImageAttributes object contains Version, Reserved,
+WrapMode, ClampColor, and ObjectClamp fields. GDI+ color adjustments such as a
+ColorMatrix are commonly applied by the producer while serializing image data;
+they are not invented as undocumented trailing ImageAttributes fields. Any
+nonzero extension bytes are rejected explicitly.
 
-The committed project-owned EMF+ Only and Dual fixtures exercise a pen,
-ellipse, solid fill, font, and Unicode DrawString. Synthetic unit tests cover
-additional state, path, brush, clip, bitmap, malformed-input, strict/permissive,
-and determinism behavior. A broad Windows GDI+ comparison corpus and an
-independently sourced Office corpus remain unchecked release gates.
+## Safety and qualification
 
-DrawString Near/Center/Far anchors are computed from `LayoutRect` before page
-and world transforms. DrawLines supports absolute float, compressed absolute,
-relative PointR, and closed-line flags. Linear-gradient brush transforms are
-applied before page/world transforms. Unsupported object definitions retain
-their object-table slot; permissive playback diagnoses/skips them when used,
-while strict playback fails at use.
+Malformed inner headers, sizes, fragments, paths, transforms, images, regions,
+and strings return typed errors with outer EMF and inner EMF+ context. Limits
+bound comment/record/object bytes, points, strings, gradient stops, dash data,
+region nodes/depth, state/container depth, decoded pixels, diagnostics, and SVG
+output. PNG/JPEG dimensions are checked before accepting decoded allocations.
+
+Local Windows qualification covers 21 total WMF/EMF/EMF+ cases, including
+seven EMF+ cases. Independent Office-derived EMF+ evidence and hosted CI remain
+separate, explicitly unchecked gates.

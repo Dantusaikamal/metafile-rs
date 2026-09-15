@@ -90,7 +90,12 @@ $cases = @(
     @{ Name = 'windows-emf-affine'; Extension = 'emf'; Profile = 'bitmap' },
     @{ Name = 'windows-emf-arc-matrix'; Extension = 'emf'; Profile = 'vector' },
     @{ Name = 'windows-gdiplus-emfplus-only'; Extension = 'emf'; Profile = 'text' },
-    @{ Name = 'windows-gdiplus-emfplus'; Extension = 'emf'; Profile = 'text' }
+    @{ Name = 'windows-gdiplus-emfplus'; Extension = 'emf'; Profile = 'text' },
+    @{ Name = 'windows-gdiplus-emfplus-p1-vectors'; Extension = 'emf'; Profile = 'vector' },
+    @{ Name = 'windows-gdiplus-emfplus-p1-images'; Extension = 'emf'; Profile = 'bitmap' },
+    @{ Name = 'windows-gdiplus-emfplus-p1-text'; Extension = 'emf'; Profile = 'text' },
+    @{ Name = 'windows-gdiplus-emfplus-p1-regions'; Extension = 'emf'; Profile = 'gradient' },
+    @{ Name = 'windows-gdiplus-emfplus-p1-state'; Extension = 'emf'; Profile = 'vector' }
 )
 
 for ($index = 0; $index -lt $cases.Count; $index++) {

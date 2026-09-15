@@ -10,9 +10,12 @@ repository.workspace = true
 [dependencies]
 metafile-core = { path = "../metafile-core" }
 serde.workspace = true
+png.workspace = true
+jpeg-decoder.workspace = true
 
 [dev-dependencies]
 metafile-svg = { path = "../metafile-svg" }
+jpeg-encoder = "0.6"
 
 [lints]
 workspace = true

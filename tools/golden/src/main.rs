@@ -81,6 +81,16 @@ fn profile(name: &str) -> Result<Thresholds, Box<dyn Error>> {
             differing: 27.0,
             bounds_delta: 3,
         },
+        "gradient" => Thresholds {
+            // GDI+ and SVG interpolate gradient channels with measurably
+            // different rounding across most painted pixels. Gate aggregate
+            // color error and geometry tightly instead of treating every
+            // one-channel rounding difference as a structural failure.
+            mae: 4.0,
+            rms: 12.0,
+            differing: 35.0,
+            bounds_delta: 3,
+        },
         "text" => Thresholds {
             mae: 15.0,
             rms: 50.0,
@@ -150,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     if positional.len() != 2 {
-        return Err("usage: metafile-golden [--profile vector|bitmap|text] [--metrics metrics.json] [--difference difference.png] reference.png candidate.png".into());
+        return Err("usage: metafile-golden [--profile vector|bitmap|gradient|text] [--metrics metrics.json] [--difference difference.png] reference.png candidate.png".into());
     }
     let reference = decode(Path::new(&positional[0]))?;
     let candidate = decode(Path::new(&positional[1]))?;
