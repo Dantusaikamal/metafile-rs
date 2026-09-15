@@ -3,6 +3,12 @@
 This checklist records evidence, not intent. Local results do not mark remote
 GitHub-hosted jobs or reference-renderer qualification as complete.
 
+| Format | Engine implementation | Windows reference | Independent Office | Verdict |
+| --- | --- | --- | --- | --- |
+| WMF | Common document subset implemented and regression-tested | Project-owned matrix previously qualified; current hosted run pending | Missing | READY WITH DOCUMENTED LIMITATIONS |
+| ordinary EMF | Common vectors/state/text/BI_RGB implemented and regression-tested | Project-owned matrix previously qualified; current hosted run pending | Missing | READY WITH DOCUMENTED LIMITATIONS |
+| EMF+ | Initial P0 subset; known P1 features remain unsupported | Expanded matrix not yet proven green | Missing | NOT READY |
+
 - [ ] GitHub CI green on Linux, macOS, and Windows for these qualification changes (the base commit was green)
 - [x] Rust 1.88 MSRV commands pass locally
 - [x] current stable (1.98.1 during this pass) commands pass locally and are in CI

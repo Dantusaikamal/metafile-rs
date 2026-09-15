@@ -36,23 +36,30 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         metafile_core::MetafileError::InvalidRestoreDc { value, .. } => Some(*value),
         _ => None,
     };
-    let (offset, record_index) = match &e {
+    let (offset, record_index, record_type) = match &e {
         metafile_core::MetafileError::TruncatedInput { offset, .. }
         | metafile_core::MetafileError::InvalidRecordSize { offset, .. }
-        | metafile_core::MetafileError::RecordOutOfBounds { offset, .. } => (Some(*offset), None),
+        | metafile_core::MetafileError::RecordOutOfBounds { offset, .. } => {
+            (Some(*offset), None, None)
+        }
         metafile_core::MetafileError::InvalidObjectHandle { record_index, .. }
         | metafile_core::MetafileError::ObjectInUse { record_index, .. }
         | metafile_core::MetafileError::InvalidRestoreDc { record_index, .. }
         | metafile_core::MetafileError::InvalidBitmap { record_index, .. }
         | metafile_core::MetafileError::UnsupportedBitmap { record_index, .. } => {
-            (None, Some(*record_index))
+            (None, Some(*record_index), None)
         }
         metafile_core::MetafileError::InvalidEmfPlus {
             offset,
             outer_record_index,
+            record_type,
             ..
-        } => (Some(*offset), Some(*outer_record_index)),
-        _ => (None, None),
+        } => (
+            Some(*offset),
+            Some(*outer_record_index),
+            Some(u32::from(*record_type)),
+        ),
+        _ => (None, None, None),
     };
     let code = match &e {
         metafile_core::MetafileError::UnsupportedFormat => "unsupported_format",
@@ -78,7 +85,7 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         message: e.to_string(),
         offset,
         record_index,
-        record_type: None,
+        record_type,
         restore_dc_value,
     })
     .unwrap_or_else(|_| structured_error(code, &e.to_string()))
