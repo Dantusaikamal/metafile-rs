@@ -285,9 +285,9 @@ enum Object {
     Path(Path),
     Region(ClipRegion),
     Image(Bitmap),
-    Font(Font),
+    Font(EmfPlusFont),
     StringFormat(StringFormat),
-    Unsupported,
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -295,6 +295,12 @@ struct StringFormat {
     horizontal: HorizontalTextAlignment,
     vertical: VerticalTextAlignment,
     flags: u32,
+}
+
+#[derive(Debug, Clone)]
+struct EmfPlusFont {
+    font: Font,
+    unit: u32,
 }
 
 #[derive(Clone)]
@@ -371,7 +377,25 @@ pub fn playback(
     };
     let mut diagnostics = info.warnings.clone();
     for record in records {
-        player.play(record, renderer, &mut diagnostics)?;
+        if let Err(error) = player.play(record, renderer, &mut diagnostics) {
+            match error {
+                MetafileError::UnsupportedCriticalFeature(message) if !options.strict => {
+                    if diagnostics.len() < options.limits.max_diagnostics {
+                        diagnostics.push(
+                            Diagnostic::warning("emfplus_unsupported_semantics", message)
+                                .at_record(
+                                    record.origin.outer_record_index,
+                                    u32::from(record.kind),
+                                    record_name(record.kind),
+                                    record.origin.absolute_start
+                                        + record.offset.saturating_sub(record.origin.logical_start),
+                                ),
+                        );
+                    }
+                }
+                error => return Err(error),
+            }
+        }
     }
     if player.pending.is_some() {
         return Err(MetafileError::InvalidHeader(
@@ -421,7 +445,7 @@ impl Player<'_> {
             TRANSLATE_WORLD_TRANSFORM => self.simple_transform(record, 0),
             SCALE_WORLD_TRANSFORM => self.simple_transform(record, 1),
             ROTATE_WORLD_TRANSFORM => self.simple_transform(record, 2),
-            SET_PAGE_TRANSFORM => self.set_page_transform(record),
+            SET_PAGE_TRANSFORM => self.set_page_transform(record, diagnostics),
             RESET_CLIP => {
                 self.state.clip = None;
                 Ok(())
@@ -549,7 +573,12 @@ impl Player<'_> {
                         "continued object state was unexpectedly absent",
                     );
                 };
-                self.objects[id] = Some(parse_object(kind, &pending.data, self.limits, record)?);
+                self.objects[id] = Some(parse_object_or_unsupported(
+                    kind,
+                    &pending.data,
+                    self.limits,
+                    record,
+                )?);
             }
             return Ok(());
         }
@@ -560,7 +589,12 @@ impl Player<'_> {
                 limit: self.limits.max_object_bytes as u64,
             });
         }
-        self.objects[id] = Some(parse_object(kind, record.data, self.limits, record)?);
+        self.objects[id] = Some(parse_object_or_unsupported(
+            kind,
+            record.data,
+            self.limits,
+            record,
+        )?);
         Ok(())
     }
 
@@ -649,14 +683,19 @@ impl Player<'_> {
             )
         })?;
         self.check_points(count, "EMF+ points")?;
-        let points = read_points(
-            record.data,
-            offset + 4,
-            count,
-            record.flags & 0x4000 != 0,
-            record,
-        )?;
-        let path = points_path(&points, record.kind == DRAW_BEZIERS, fill, record)?;
+        let points = if record.flags & 0x0800 != 0 {
+            read_relative_points(record.data, offset + 4, count, record)?
+        } else {
+            read_points(
+                record.data,
+                offset + 4,
+                count,
+                record.flags & 0x4000 != 0,
+                record,
+            )?
+        };
+        let closed = fill || (record.kind == DRAW_LINES && record.flags & 0x2000 != 0);
+        let path = points_path(&points, record.kind == DRAW_BEZIERS, closed, record)?;
         let path = self.transform_path(&path);
         let paint = paint.as_ref().map(|paint| self.transform_paint(paint));
         let stroke = stroke.as_ref().map(|stroke| self.transform_stroke(stroke));
@@ -837,9 +876,9 @@ impl Player<'_> {
             "emfplus_text_metrics_approximate",
             "DrawString uses host SVG font metrics; exact GDI+ layout is not available",
         )?;
-        let mut run_font = font.clone();
-        run_font.height *= self.unit_scale(3, false);
-        let position = self.transform(Point::new(layout.left, layout.top));
+        let mut run_font = font.font.clone();
+        run_font.height *= self.unit_scale(font.unit, false);
+        let position = self.transform(layout_anchor(layout, format.horizontal, format.vertical));
         renderer.text(&TextRun {
             position,
             text,
@@ -862,15 +901,48 @@ impl Player<'_> {
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<()> {
         let id = usize::from(record.flags & 0xff);
-        let Object::Image(bitmap) = self.object_ref(id, record)? else {
+        let bitmap = match self.object_ref(id, record)? {
+            Object::Image(bitmap) => bitmap,
+            Object::Unsupported(message) => {
+                return Err(MetafileError::UnsupportedCriticalFeature(message.clone()))
+            }
+            _ => {
+                return invalid(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "image record references a non-image object",
+                )
+            }
+        };
+        let attributes_id = u32_at(record.data, 0)?;
+        if i32_at(record.data, 4)? != 2 {
             return invalid(
                 record.origin,
                 record.index,
                 record.kind,
                 record.offset,
-                "image record references a non-image object",
+                "DrawImage source unit must be Pixel",
             );
-        };
+        }
+        let mut source = rect_f(record.data, 8, record)?;
+        if [source.left, source.top, source.right, source.bottom]
+            .iter()
+            .any(|value| value.fract() != 0.0)
+        {
+            self.note(
+                record,
+                diagnostics,
+                "emfplus_fractional_image_crop_approximate",
+                "fractional image source rectangle was expanded to whole pixels",
+            )?;
+            source.left = source.left.floor();
+            source.top = source.top.floor();
+            source.right = source.right.ceil();
+            source.bottom = source.bottom.ceil();
+        }
+        let cropped = crop_bitmap(bitmap, source, record)?;
         // Both records begin with ImageAttributesId, SrcUnit and SrcRectF.
         // DrawImage then stores DstRectF; DrawImagePoints stores Count and a
         // three-point destination parallelogram (MS-EMFPLUS 2.3.4.8/2.3.4.9).
@@ -888,9 +960,13 @@ impl Player<'_> {
                     "DrawImagePoints destination point count must be three",
                 );
             }
-            let point_size = if record.flags & 0x4000 != 0 { 4 } else { 8 };
-            require_len(record, 28 + 3 * point_size)?;
-            let points = read_points(record.data, 28, 3, record.flags & 0x4000 != 0, record)?;
+            let points = if record.flags & 0x0800 != 0 {
+                read_relative_points(record.data, 28, 3, record)?
+            } else {
+                let point_size = if record.flags & 0x4000 != 0 { 4 } else { 8 };
+                require_len(record, 28 + 3 * point_size)?;
+                read_points(record.data, 28, 3, record.flags & 0x4000 != 0, record)?
+            };
             let origin = points[0];
             let x_axis = Vector::new(points[1].x - origin.x, points[1].y - origin.y);
             let y_axis = Vector::new(points[2].x - origin.x, points[2].y - origin.y);
@@ -899,22 +975,36 @@ impl Player<'_> {
                 x_axis,
                 y_axis,
             });
+            if attributes_id != u32::MAX {
+                self.note(
+                    record,
+                    diagnostics,
+                    "emfplus_image_attributes_unsupported",
+                    "image attributes and wrap mode are not yet applied",
+                )?;
+            }
+            return renderer.bitmap(
+                placement,
+                &cropped,
+                self.sampling(),
+                self.state.clip.as_ref(),
+            );
+        };
+        let placement = self.transform_placement(BitmapPlacement::from_rect(destination));
+        if attributes_id != u32::MAX {
             self.note(
                 record,
                 diagnostics,
                 "emfplus_image_attributes_unsupported",
                 "image attributes and wrap mode are not yet applied",
             )?;
-            return renderer.bitmap(placement, bitmap, self.sampling(), self.state.clip.as_ref());
-        };
-        let placement = self.transform_placement(BitmapPlacement::from_rect(destination));
-        self.note(
-            record,
-            diagnostics,
-            "emfplus_image_attributes_unsupported",
-            "image attributes and wrap mode are not yet applied",
-        )?;
-        renderer.bitmap(placement, bitmap, self.sampling(), self.state.clip.as_ref())
+        }
+        renderer.bitmap(
+            placement,
+            &cropped,
+            self.sampling(),
+            self.state.clip.as_ref(),
+        )
     }
 
     fn save(&mut self, record: Record<'_>) -> Result<()> {
@@ -1070,7 +1160,11 @@ impl Player<'_> {
         Ok(())
     }
 
-    fn set_page_transform(&mut self, record: Record<'_>) -> Result<()> {
+    fn set_page_transform(
+        &mut self,
+        record: Record<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Result<()> {
         require_len(record, 4)?;
         let scale = f64::from(f32_at(record.data, 0)?);
         if !scale.is_finite() || scale <= 0.0 {
@@ -1082,7 +1176,25 @@ impl Player<'_> {
                 "invalid page scale",
             );
         }
-        self.state.page_unit = u32::from(record.flags & 0xff);
+        let unit = u32::from(record.flags & 0xff);
+        if unit > 6 {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "invalid page unit",
+            );
+        }
+        if unit <= 1 {
+            self.note(
+                record,
+                diagnostics,
+                "emfplus_unusual_page_unit",
+                "World/Display units are discouraged for SetPageTransform and may be device-dependent",
+            )?;
+        }
+        self.state.page_unit = unit;
         self.state.page_scale = scale;
         Ok(())
     }
@@ -1195,6 +1307,9 @@ impl Player<'_> {
             })?;
             match self.object_ref(id, record)? {
                 Object::Brush(paint) => Ok(paint.clone()),
+                Object::Unsupported(message) => {
+                    Err(MetafileError::UnsupportedCriticalFeature(message.clone()))
+                }
                 _ => invalid(
                     record.origin,
                     record.index,
@@ -1209,6 +1324,9 @@ impl Player<'_> {
     fn pen(&self, id: usize, record: Record<'_>) -> Result<Stroke> {
         match self.object_ref(id, record)? {
             Object::Pen(stroke) => Ok(stroke.clone()),
+            Object::Unsupported(message) => {
+                Err(MetafileError::UnsupportedCriticalFeature(message.clone()))
+            }
             _ => invalid(
                 record.origin,
                 record.index,
@@ -1246,7 +1364,8 @@ impl Player<'_> {
     fn unit_scale(&self, unit: u32, y: bool) -> f64 {
         let dpi = if y { self.dpi_y } else { self.dpi_x };
         match unit {
-            0..=2 => 1.0,
+            0 | 2 => 1.0,
+            1 => dpi / 75.0,
             3 => dpi / 72.0,
             4 => dpi,
             5 => dpi / 300.0,
@@ -1390,7 +1509,21 @@ fn parse_object(
         5 => parse_image(data, limits, record).map(Object::Image),
         6 => parse_font(data, limits, record).map(Object::Font),
         7 => parse_string_format(data, limits, record).map(Object::StringFormat),
-        _ => Ok(Object::Unsupported),
+        _ => Ok(Object::Unsupported(format!(
+            "EMF+ object type {kind} is not implemented"
+        ))),
+    }
+}
+
+fn parse_object_or_unsupported(
+    kind: u8,
+    data: &[u8],
+    limits: &ResourceLimits,
+    record: Record<'_>,
+) -> Result<Object> {
+    match parse_object(kind, data, limits, record) {
+        Err(MetafileError::UnsupportedCriticalFeature(message)) => Ok(Object::Unsupported(message)),
+        result => result,
     }
 }
 
@@ -1460,6 +1593,7 @@ fn parse_linear_gradient(
     let start_color = argb(u32_at(data, 24)?);
     let end_color = argb(u32_at(data, 28)?);
     let mut cursor = 40;
+    let mut brush_transform = Transform::IDENTITY;
     if flags & 2 != 0 {
         if data.len() < cursor + 24 {
             return invalid(
@@ -1470,6 +1604,7 @@ fn parse_linear_gradient(
                 "truncated gradient transform",
             );
         }
+        brush_transform = read_transform(&data[cursor..cursor + 24], record)?;
         cursor += 24;
     }
     let mut stops = vec![
@@ -1579,8 +1714,8 @@ fn parse_linear_gradient(
         ));
     }
     Ok(Paint::LinearGradient {
-        start: Point::new(rect.left, rect.top),
-        end: Point::new(rect.right, rect.bottom),
+        start: brush_transform.transform_point(Point::new(rect.left, rect.top)),
+        end: brush_transform.transform_point(Point::new(rect.right, rect.bottom)),
         stops,
         wrap_mode,
     })
@@ -1942,7 +2077,7 @@ fn parse_image(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resu
     })
 }
 
-fn parse_font(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result<Font> {
+fn parse_font(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Result<EmfPlusFont> {
     if data.len() < 24 {
         return invalid(
             record.origin,
@@ -1953,6 +2088,16 @@ fn parse_font(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resul
         );
     }
     let size = f64::from(f32_at(data, 4)?);
+    let unit = u32_at(data, 8)?;
+    if unit > 6 {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "invalid font size unit",
+        );
+    }
     let style = u32_at(data, 12)?;
     let length = usize::try_from(u32_at(data, 20)?).map_err(|_| {
         malformed(
@@ -1993,16 +2138,19 @@ fn parse_font(data: &[u8], limits: &ResourceLimits, record: Record<'_>) -> Resul
         .map(|index| u16::from_le_bytes([encoded[index * 2], encoded[index * 2 + 1]]))
         .collect::<Vec<_>>();
     let family = String::from_utf16_lossy(&units);
-    Ok(Font {
-        height: size,
-        width: 0.0,
-        escapement_tenths: 0,
-        weight: if style & 1 != 0 { 700 } else { 400 },
-        italic: style & 2 != 0,
-        underline: style & 4 != 0,
-        strike_out: style & 8 != 0,
-        charset: 1,
-        family,
+    Ok(EmfPlusFont {
+        font: Font {
+            height: size,
+            width: 0.0,
+            escapement_tenths: 0,
+            weight: if style & 1 != 0 { 700 } else { 400 },
+            italic: style & 2 != 0,
+            underline: style & 4 != 0,
+            strike_out: style & 8 != 0,
+            charset: 1,
+            family,
+        },
+        unit,
     })
 }
 
@@ -2281,6 +2429,206 @@ fn read_points(
         points.push(point);
     }
     Ok(points)
+}
+
+fn read_relative_points(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    record: Record<'_>,
+) -> Result<Vec<Point>> {
+    let mut cursor = offset;
+    let mut current = Point::new(0.0, 0.0);
+    let mut points = Vec::with_capacity(count);
+    for _ in 0..count {
+        let x = read_relative_integer(data, &mut cursor, record)?;
+        let y = read_relative_integer(data, &mut cursor, record)?;
+        current = Point::new(current.x + f64::from(x), current.y + f64::from(y));
+        points.push(current);
+    }
+    Ok(points)
+}
+
+fn read_relative_integer(data: &[u8], cursor: &mut usize, record: Record<'_>) -> Result<i16> {
+    let first = *data.get(*cursor).ok_or_else(|| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "truncated relative point coordinate",
+        )
+    })?;
+    *cursor += 1;
+    if first & 0x80 == 0 {
+        let value = i16::from(first & 0x7f);
+        Ok(if value & 0x40 != 0 {
+            value - 0x80
+        } else {
+            value
+        })
+    } else {
+        let second = *data.get(*cursor).ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "truncated 15-bit relative point coordinate",
+            )
+        })?;
+        *cursor += 1;
+        let value = (i16::from(first & 0x7f) << 8) | i16::from(second);
+        Ok(if value & 0x4000 != 0 {
+            value | i16::MIN
+        } else {
+            value
+        })
+    }
+}
+
+fn crop_bitmap(bitmap: &Bitmap, source: Rect, record: Record<'_>) -> Result<Bitmap> {
+    let left = source.left as i64;
+    let top = source.top as i64;
+    let right = source.right as i64;
+    let bottom = source.bottom as i64;
+    if left < 0
+        || top < 0
+        || right <= left
+        || bottom <= top
+        || right > i64::from(bitmap.width)
+        || bottom > i64::from(bitmap.height)
+    {
+        return invalid(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "image source rectangle is empty or outside bitmap bounds",
+        );
+    }
+    let width = u32::try_from(right - left).map_err(|_| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "image crop width overflow",
+        )
+    })?;
+    let height = u32::try_from(bottom - top).map_err(|_| {
+        malformed(
+            record.origin,
+            record.index,
+            record.kind,
+            record.offset,
+            "image crop height overflow",
+        )
+    })?;
+    let bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "image crop allocation overflow",
+            )
+        })?;
+    let mut rgba = Vec::with_capacity(bytes);
+    let source_stride = usize::try_from(bitmap.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "image stride overflow",
+            )
+        })?;
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "image crop stride overflow",
+            )
+        })?;
+    for y in top..bottom {
+        let start = usize::try_from(y)
+            .ok()
+            .and_then(|y| y.checked_mul(source_stride))
+            .and_then(|offset| {
+                usize::try_from(left)
+                    .ok()
+                    .and_then(|left| left.checked_mul(4))
+                    .and_then(|left| offset.checked_add(left))
+            })
+            .ok_or_else(|| {
+                malformed(
+                    record.origin,
+                    record.index,
+                    record.kind,
+                    record.offset,
+                    "image crop offset overflow",
+                )
+            })?;
+        let end = start.checked_add(row_bytes).ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "image crop offset overflow",
+            )
+        })?;
+        let row = bitmap.rgba.get(start..end).ok_or_else(|| {
+            malformed(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "image crop exceeds decoded pixels",
+            )
+        })?;
+        rgba.extend_from_slice(row);
+    }
+    Ok(Bitmap {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn layout_anchor(
+    layout: Rect,
+    horizontal: HorizontalTextAlignment,
+    vertical: VerticalTextAlignment,
+) -> Point {
+    let x = match horizontal {
+        HorizontalTextAlignment::Left => layout.left,
+        HorizontalTextAlignment::Center => (layout.left + layout.right) / 2.0,
+        HorizontalTextAlignment::Right => layout.right,
+    };
+    let y = match vertical {
+        VerticalTextAlignment::Top | VerticalTextAlignment::Baseline => layout.top,
+        VerticalTextAlignment::Center => (layout.top + layout.bottom) / 2.0,
+        VerticalTextAlignment::Bottom => layout.bottom,
+    };
+    Point::new(x, y)
 }
 
 fn argb(value: u32) -> Color {
@@ -2941,6 +3289,169 @@ mod tests {
     }
 
     #[test]
+    fn draw_string_anchors_are_relative_to_layout_rect_and_transform() {
+        let family: Vec<u8> = "Arial".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut font = bytes_u32(&[0xdbc0_1002]);
+        font.extend_from_slice(&12f32.to_le_bytes());
+        font.extend_from_slice(&bytes_u32(&[3, 0, 0, 5]));
+        font.extend_from_slice(&family);
+        let mut format = vec![0; 60];
+        format[12..16].copy_from_slice(&1u32.to_le_bytes());
+        format[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let text: Vec<u8> = "Ω".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut draw = bytes_u32(&[0xff00_0000, 2, 1]);
+        draw.extend_from_slice(&floats(&[10.0, 20.0, 100.0, 50.0]));
+        draw.extend_from_slice(&text);
+        let translated = record(TRANSLATE_WORLD_TRANSFORM, 0, floats(&[5.0, 7.0]));
+        let (svg, _) = render(
+            &stream(
+                false,
+                &[
+                    record(OBJECT, 0x0601, font),
+                    record(OBJECT, 0x0702, format),
+                    translated,
+                    record(DRAW_STRING, 0x8001, draw),
+                ],
+            ),
+            false,
+        )
+        .unwrap();
+        assert!(
+            svg.contains("x=\"65\" y=\"52\"") && svg.contains("Ω"),
+            "{svg}"
+        );
+    }
+
+    #[test]
+    fn layout_anchor_covers_near_center_far_and_zero_size() {
+        let layout = Rect {
+            left: 10.0,
+            top: 20.0,
+            right: 110.0,
+            bottom: 70.0,
+        };
+        assert_eq!(
+            layout_anchor(
+                layout,
+                HorizontalTextAlignment::Left,
+                VerticalTextAlignment::Top
+            ),
+            Point::new(10.0, 20.0)
+        );
+        assert_eq!(
+            layout_anchor(
+                layout,
+                HorizontalTextAlignment::Center,
+                VerticalTextAlignment::Center
+            ),
+            Point::new(60.0, 45.0)
+        );
+        assert_eq!(
+            layout_anchor(
+                layout,
+                HorizontalTextAlignment::Right,
+                VerticalTextAlignment::Bottom
+            ),
+            Point::new(110.0, 70.0)
+        );
+        let zero = Rect {
+            left: 7.0,
+            top: 9.0,
+            right: 7.0,
+            bottom: 9.0,
+        };
+        assert_eq!(
+            layout_anchor(
+                zero,
+                HorizontalTextAlignment::Center,
+                VerticalTextAlignment::Center
+            ),
+            Point::new(7.0, 9.0)
+        );
+    }
+
+    #[test]
+    fn image_source_crop_selects_exact_pixels() {
+        let bitmap = Bitmap {
+            width: 3,
+            height: 2,
+            rgba: (0u8..24).collect(),
+        };
+        let dummy = Record {
+            index: 0,
+            kind: DRAW_IMAGE,
+            flags: 0,
+            offset: 0,
+            origin: Origin {
+                logical_start: 0,
+                logical_end: 0,
+                outer_record_index: 0,
+                absolute_start: 0,
+            },
+            data: &[],
+        };
+        let cropped = crop_bitmap(
+            &bitmap,
+            Rect {
+                left: 1.0,
+                top: 0.0,
+                right: 3.0,
+                bottom: 1.0,
+            },
+            dummy,
+        )
+        .unwrap();
+        assert_eq!((cropped.width, cropped.height), (2, 1));
+        assert_eq!(cropped.rgba, (4u8..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn draw_lines_supports_relative_and_closed_flags() {
+        let pen = record(OBJECT, 0x0200, pen(0xff00_00ff, 1.0, 0, &[]));
+        let mut relative = bytes_u32(&[3]);
+        relative.extend_from_slice(&[10, 10, 10, 0, 0, 10]);
+        relative.extend_from_slice(&[0, 0]);
+        let (svg, _) = render(
+            &stream(false, &[pen, record(DRAW_LINES, 0x2800, relative)]),
+            false,
+        )
+        .unwrap();
+        assert!(svg.contains("M 10 10 L 20 10 L 20 20 Z"), "{svg}");
+
+        let malformed = stream(false, &[record(DRAW_LINES, 0x0800, bytes_u32(&[2]))]);
+        assert!(matches!(
+            render(&malformed, false),
+            Err(MetafileError::InvalidEmfPlus { .. })
+        ));
+    }
+
+    #[test]
+    fn linear_gradient_applies_brush_then_world_transform() {
+        let mut gradient = bytes_u32(&[0xdbc0_1002, 4, 2, 0]);
+        gradient.extend_from_slice(&floats(&[0.0, 0.0, 10.0, 20.0]));
+        gradient.extend_from_slice(&bytes_u32(&[0xff00_0000, 0xffff_ffff, 0, 0]));
+        gradient.extend_from_slice(&floats(&[2.0, 0.0, 0.0, 3.0, 5.0, 7.0]));
+        let mut rect = bytes_u32(&[0, 1]);
+        rect.extend_from_slice(&floats(&[0.0, 0.0, 20.0, 20.0]));
+        let (svg, _) = render(
+            &stream(
+                false,
+                &[
+                    record(OBJECT, 0x0100, gradient),
+                    record(TRANSLATE_WORLD_TRANSFORM, 0, floats(&[11.0, 13.0])),
+                    record(FILL_RECTS, 0, rect),
+                ],
+            ),
+            false,
+        )
+        .unwrap();
+        assert!(
+            svg.contains("x1=\"16\" y1=\"20\" x2=\"36\" y2=\"80\""),
+            "{svg}"
+        );
+    }
+
+    #[test]
     fn raw_argb_image_preserves_alpha() {
         let mut image = bytes_u32(&[0xdbc0_1002, 1, 1, 1, 4, 0x0026_200a, 0]);
         image.extend_from_slice(&[10, 20, 30, 128]);
@@ -2956,9 +3467,7 @@ mod tests {
             svg.contains("data:image/png;base64") && svg.contains("matrix(30 0 0 40 10 20)"),
             "{svg}"
         );
-        assert!(diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "emfplus_image_attributes_unsupported"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
@@ -2971,6 +3480,23 @@ mod tests {
             .any(|diagnostic| diagnostic.code == "emfplus_unsupported_record"));
         assert!(matches!(
             render(&data, true),
+            Err(MetafileError::UnsupportedCriticalFeature(_))
+        ));
+    }
+
+    #[test]
+    fn unsupported_objects_fail_only_when_materially_used() {
+        let texture = record(OBJECT, 0x0100, bytes_u32(&[0xdbc0_1002, 2]));
+        assert!(render(&stream(false, std::slice::from_ref(&texture)), false).is_ok());
+        let mut rect = bytes_u32(&[0, 1]);
+        rect.extend_from_slice(&floats(&[0.0, 0.0, 10.0, 10.0]));
+        let used = stream(false, &[texture, record(FILL_RECTS, 0, rect)]);
+        let (_, diagnostics) = render(&used, false).unwrap();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "emfplus_unsupported_semantics"));
+        assert!(matches!(
+            render(&used, true),
             Err(MetafileError::UnsupportedCriticalFeature(_))
         ));
     }

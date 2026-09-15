@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const [input, output, widthText = '600', heightText = '400'] = process.argv.slice(2);
@@ -17,13 +17,20 @@ const platformCandidates = process.platform === 'win32'
     ]
   : ['google-chrome', 'chromium', 'chromium-browser'];
 const candidates = [...new Set([process.env.CHROME_PATH, ...platformCandidates].filter(Boolean))];
-const browser = candidates.find((candidate) => {
-  const result = spawnSync(candidate, ['--version'], { stdio: 'ignore', timeout: 10_000 });
-  return !result.error;
-});
+let browser;
+if (process.env.CHROME_PATH && isAbsolute(process.env.CHROME_PATH) && existsSync(process.env.CHROME_PATH)) {
+  browser = process.env.CHROME_PATH;
+} else {
+  browser = candidates.find((candidate) => {
+    if (isAbsolute(candidate)) return existsSync(candidate);
+    const result = spawnSync(candidate, ['--version'], { stdio: 'ignore', timeout: 10_000 });
+    return !result.error && result.status === 0;
+  });
+}
 if (!browser) {
   throw new Error(`Chrome/Chromium/Edge not found; attempted: ${candidates.join(', ')}`);
 }
+console.log(`Using browser: ${browser}`);
 const directory = mkdtempSync(join(tmpdir(), 'metafile-rs-raster-'));
 try {
   const svg = readFileSync(resolve(input), 'utf8').replace(
@@ -37,9 +44,10 @@ try {
     `--user-data-dir=${join(directory, 'browser-profile')}`,
     `--window-size=${width},${height}`, `--screenshot=${resolve(output)}`, pathToFileURL(page).href,
   ], { encoding: 'utf8', timeout, killSignal: 'SIGKILL' });
-  if (result.error?.code === 'ETIMEDOUT') throw new Error(`browser rasterization timed out after ${timeout}ms`);
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(result.stderr || `browser exited ${result.status}`);
+  const processOutput = `stdout:\n${result.stdout || '<empty>'}\nstderr:\n${result.stderr || '<empty>'}`;
+  if (result.error?.code === 'ETIMEDOUT') throw new Error(`browser rasterization timed out after ${timeout}ms\n${processOutput}`);
+  if (result.error) throw new Error(`${result.error.message}\n${processOutput}`);
+  if (result.status !== 0) throw new Error(`browser exited ${result.status}\n${processOutput}`);
 } finally {
   rmSync(directory, { recursive: true, force: true });
 }

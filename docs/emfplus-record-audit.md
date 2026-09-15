@@ -16,14 +16,15 @@ fallback.
   simple rectangular regions, raw ARGB bitmaps, fonts, and basic StringFormat;
 - clipping: reset, rectangular/path/simple-region replacement or intersection,
   and offset;
-- images: DrawImage and DrawImagePoints with affine destination placement for
-  supported raw bitmaps;
+- images: DrawImage and DrawImagePoints with integral-pixel source cropping and
+  affine destination placement for supported raw bitmaps;
 - text: DrawString Unicode content, family, size/style, and horizontal/vertical
   layout alignment.
 
 ## Approximate or state-only
 
 - host SVG font selection and metrics are not pixel-identical to Windows GDI+;
+- fractional source-image rectangles expand to whole pixels with a diagnostic;
 - non-solid text paint falls back to a representative color with a diagnostic;
 - rendering quality, compositing, smoothing, interpolation, pixel-offset, and
   text-rendering modes are retained where useful but do not all have exact SVG
@@ -53,3 +54,10 @@ ellipse, solid fill, font, and Unicode DrawString. Synthetic unit tests cover
 additional state, path, brush, clip, bitmap, malformed-input, strict/permissive,
 and determinism behavior. A broad Windows GDI+ comparison corpus and an
 independently sourced Office corpus remain unchecked release gates.
+
+DrawString Near/Center/Far anchors are computed from `LayoutRect` before page
+and world transforms. DrawLines supports absolute float, compressed absolute,
+relative PointR, and closed-line flags. Linear-gradient brush transforms are
+applied before page/world transforms. Unsupported object definitions retain
+their object-table slot; permissive playback diagnoses/skips them when used,
+while strict playback fails at use.
