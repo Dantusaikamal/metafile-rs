@@ -57,7 +57,7 @@ try {
             acquiredDate = (Get-Date -Format 'yyyy-MM-dd')
             sha256 = ((Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash).ToLowerInvariant()
             expectedFormat = $format
-            expectedSupport = if ($format -eq 'emfplus') { 'unsupported' } else { 'render' }
+            expectedSupport = 'render'
             placeable = $null
             notableFeatures = @('Office document extraction; record audit pending')
             notes = "Source document SHA-256: $sourceHash"

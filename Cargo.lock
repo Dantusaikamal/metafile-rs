@@ -163,6 +163,16 @@ dependencies = [
  "encoding_rs",
  "metafile-core",
  "metafile-dib",
+ "metafile-emfplus",
+ "metafile-svg",
+ "serde",
+]
+
+[[package]]
+name = "metafile-emfplus"
+version = "0.1.0"
+dependencies = [
+ "metafile-core",
  "metafile-svg",
  "serde",
 ]

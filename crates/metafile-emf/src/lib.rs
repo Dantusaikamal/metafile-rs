@@ -38,6 +38,8 @@ pub struct EmfInfo {
     pub millimeters_width: i32,
     pub millimeters_height: i32,
     pub contains_emf_plus: bool,
+    pub emf_plus_dual: Option<bool>,
+    pub emf_plus_record_count: Option<u32>,
     pub has_eof: bool,
     pub warnings: Vec<Diagnostic>,
 }
@@ -77,15 +79,17 @@ pub fn playback(
     renderer: &mut dyn Renderer,
 ) -> Result<EmfPlaybackResult> {
     let parsed = parse(bytes, &options.limits)?;
-    if parsed.info.contains_emf_plus {
-        return Err(MetafileError::UnsupportedCriticalFeature(
-            "EMF+ playback is not implemented; refusing to ignore embedded EMF+ content".into(),
-        ));
-    }
     let mut diagnostics = parsed.info.warnings.clone();
-    let mut player = Player::new(options.limits.clone());
-    for record in &parsed.records {
-        player.play(*record, renderer, &mut diagnostics, options.strict)?;
+    if parsed.info.contains_emf_plus {
+        let comments = emf_plus_comments(&parsed.records)?;
+        let canvas = frame_device_bounds(&parsed.info).unwrap_or(parsed.info.bounds);
+        let result = metafile_emfplus::playback(&comments, options, canvas, renderer)?;
+        diagnostics.extend(result.diagnostics);
+    } else {
+        let mut player = Player::new(options.limits.clone());
+        for record in &parsed.records {
+            player.play(*record, renderer, &mut diagnostics, options.strict)?;
+        }
     }
     // rclBounds is an ink bound, while rclFrame is the metafile's physical
     // canvas in 0.01 mm units. Convert the frame back into device units when
@@ -307,10 +311,20 @@ fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
             format!("header declares {declared_records} records; parsed {actual_records}"),
         ));
     }
-    if contains_emf_plus {
+    let emf_plus = if contains_emf_plus {
+        let comments = emf_plus_comments(&records)?;
+        Some(metafile_emfplus::inspect(&comments, limits)?)
+    } else {
+        None
+    };
+    if let Some(emf_plus) = &emf_plus {
         warnings.push(Diagnostic::warning(
             "emf_plus_present",
-            "EMR_GDICOMMENT contains EMF+ records; EMF+ playback is not implemented",
+            if emf_plus.dual {
+                "EMR_GDICOMMENT contains an EMF+ Dual stream; EMF+ is the selected playback stream"
+            } else {
+                "EMR_GDICOMMENT contains an EMF+ Only stream"
+            },
         ));
     }
     Ok(Parsed {
@@ -334,6 +348,8 @@ fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
             millimeters_width,
             millimeters_height,
             contains_emf_plus,
+            emf_plus_dual: emf_plus.as_ref().map(|info| info.dual),
+            emf_plus_record_count: emf_plus.as_ref().map(|info| info.record_count),
             has_eof,
             warnings,
         },
@@ -393,53 +409,44 @@ fn is_emf_plus_comment(bytes: &[u8], limits: &ResourceLimits) -> Result<bool> {
     if length < 4 || &bytes[12..16] != b"EMF+" {
         return Ok(false);
     }
-    let mut offset = 16usize;
-    let mut records = 0usize;
-    while offset < end {
-        records += 1;
-        if records > limits.max_records {
-            return Err(MetafileError::ResourceLimitExceeded {
-                resource: "EMF+ records per comment",
-                actual: records as u64,
-                limit: limits.max_records as u64,
-            });
-        }
-        if end - offset < 12 {
-            return Err(MetafileError::TruncatedInput {
-                offset,
-                needed: 12,
-                available: end - offset,
-            });
-        }
-        let size = usize::try_from(le_u32(bytes, offset + 4)?)
-            .map_err(|_| MetafileError::InvalidHeader("EMF+ record size overflow".into()))?;
-        let data_size = usize::try_from(le_u32(bytes, offset + 8)?)
-            .map_err(|_| MetafileError::InvalidHeader("EMF+ data size overflow".into()))?;
-        if size < 12 || size % 4 != 0 {
-            return Err(MetafileError::InvalidRecordSize {
-                offset,
-                words: u32::try_from(size / 4).unwrap_or(u32::MAX),
-            });
-        }
-        if data_size > size - 12 {
-            return Err(MetafileError::InvalidHeader(format!(
-                "EMF+ data size {data_size} exceeds record payload {}",
-                size - 12
-            )));
-        }
-        let record_end = offset
-            .checked_add(size)
-            .ok_or_else(|| MetafileError::InvalidHeader("EMF+ record end overflow".into()))?;
-        if record_end > end {
-            return Err(MetafileError::RecordOutOfBounds {
-                offset,
-                end: record_end,
-                input_len: end,
-            });
-        }
-        offset = record_end;
+    if length > limits.max_comment_bytes {
+        return Err(MetafileError::ResourceLimitExceeded {
+            resource: "EMF+ comment bytes",
+            actual: length as u64,
+            limit: limits.max_comment_bytes as u64,
+        });
     }
     Ok(true)
+}
+
+fn emf_plus_comments<'a>(records: &[Record<'a>]) -> Result<Vec<metafile_emfplus::Comment<'a>>> {
+    records
+        .iter()
+        .filter(|record| {
+            record.kind == EMR_GDICOMMENT
+                && record.bytes.len() >= 16
+                && &record.bytes[12..16] == b"EMF+"
+        })
+        .map(|record| {
+            let length = usize::try_from(le_u32(record.bytes, 8)?)
+                .map_err(|_| MetafileError::InvalidHeader("comment length overflow".into()))?;
+            let end = 12usize
+                .checked_add(length)
+                .ok_or_else(|| MetafileError::InvalidHeader("comment length overflow".into()))?;
+            if end > record.bytes.len() {
+                return Err(MetafileError::TruncatedInput {
+                    offset: record.offset + 12,
+                    needed: length,
+                    available: record.bytes.len() - 12,
+                });
+            }
+            Ok(metafile_emfplus::Comment {
+                outer_record_index: record.index,
+                offset: record.offset + 16,
+                data: &record.bytes[16..end],
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]

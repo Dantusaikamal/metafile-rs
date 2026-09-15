@@ -28,6 +28,34 @@ fn modify_transform(values: [f32; 6], mode: u32) -> Vec<u8> {
     payload
 }
 
+fn emf_plus_record(kind: u16, flags: u16, data: &[u8]) -> Vec<u8> {
+    assert_eq!(data.len() % 4, 0);
+    let mut output = Vec::with_capacity(12 + data.len());
+    output.extend_from_slice(&kind.to_le_bytes());
+    output.extend_from_slice(&flags.to_le_bytes());
+    output.extend_from_slice(&((12 + data.len()) as u32).to_le_bytes());
+    output.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    output.extend_from_slice(data);
+    output
+}
+
+fn emf_plus_comment(dual: bool, extra: &[Vec<u8>]) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.extend_from_slice(&0xdbc0_1002u32.to_le_bytes());
+    header.extend_from_slice(&u32::from(dual).to_le_bytes());
+    header.extend_from_slice(&96u32.to_le_bytes());
+    header.extend_from_slice(&96u32.to_le_bytes());
+    let mut stream = emf_plus_record(0x4001, u16::from(dual), &header);
+    for item in extra {
+        stream.extend_from_slice(item);
+    }
+    stream.extend_from_slice(&emf_plus_record(0x4002, 0, &[]));
+    let mut comment = ((stream.len() + 4) as u32).to_le_bytes().to_vec();
+    comment.extend_from_slice(b"EMF+");
+    comment.extend_from_slice(&stream);
+    record(70, &comment)
+}
+
 fn emf(records: &[Vec<u8>]) -> Vec<u8> {
     let mut output = vec![0; 88];
     output[0..4].copy_from_slice(&1u32.to_le_bytes());
@@ -329,16 +357,13 @@ fn arbitrary_affine_text_is_explicitly_approximate_or_strictly_rejected() {
 }
 
 #[test]
-fn emf_plus_is_classified_and_not_rendered() {
-    let mut comment = 4u32.to_le_bytes().to_vec();
-    comment.extend_from_slice(b"EMF+");
-    let input = emf(&[record(70, &comment)]);
+fn emf_plus_is_classified_and_uses_dedicated_playback() {
+    let input = emf(&[emf_plus_comment(false, &[])]);
     let info = inspect(&input).unwrap();
     assert_eq!(info.format, MetafileFormat::EmfPlus);
-    assert!(matches!(
-        render(&input, false),
-        Err(MetafileError::UnsupportedCriticalFeature(_))
-    ));
+    assert_eq!(info.emf_plus_dual, Some(false));
+    assert_eq!(info.emf_plus_record_count, Some(2));
+    assert!(render(&input, false).unwrap().0.contains("<svg"));
 }
 
 #[test]
@@ -354,20 +379,13 @@ fn emf_plus_comment_validation_is_bounded_and_deterministic() {
     let short = emf(&[record(70, &0u32.to_le_bytes())]);
     assert_eq!(inspect(&short).unwrap().format, MetafileFormat::Emf);
 
-    let mut comment = 4u32.to_le_bytes().to_vec();
-    comment.extend_from_slice(b"EMF+");
-    let valid = emf(&[record(70, &comment)]);
+    let valid = emf(&[emf_plus_comment(false, &[])]);
     assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
     assert_eq!(inspect(&valid).unwrap().format, MetafileFormat::EmfPlus);
 
-    let mut unknown = 16u32.to_le_bytes().to_vec();
-    unknown.extend_from_slice(b"EMF+");
-    unknown.extend_from_slice(&0x4fffu16.to_le_bytes());
-    unknown.extend_from_slice(&0u16.to_le_bytes());
-    unknown.extend_from_slice(&12u32.to_le_bytes());
-    unknown.extend_from_slice(&0u32.to_le_bytes());
+    let unknown = emf_plus_comment(false, &[emf_plus_record(0x4fff, 0, &[])]);
     assert_eq!(
-        inspect(&emf(&[record(70, &unknown)])).unwrap().format,
+        inspect(&emf(&[unknown])).unwrap().format,
         MetafileFormat::EmfPlus
     );
 
@@ -379,7 +397,7 @@ fn emf_plus_comment_validation_is_bounded_and_deterministic() {
     bad_record.extend_from_slice(&8u32.to_le_bytes());
     assert!(matches!(
         inspect(&emf(&[record(70, &bad_record)])),
-        Err(MetafileError::RecordOutOfBounds { .. })
+        Err(MetafileError::InvalidEmfPlus { .. })
     ));
 
     let mut options = RenderOptions::default();

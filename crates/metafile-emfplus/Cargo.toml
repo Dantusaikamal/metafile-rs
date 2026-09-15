@@ -1,6 +1,6 @@
 [package]
-name = "metafile-emf"
-description = "First-party safe EMF parser, inspection, and renderer-independent playback engine"
+name = "metafile-emfplus"
+description = "First-party safe EMF+ parser and renderer-independent playback engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-encoding_rs.workspace = true
 metafile-core = { path = "../metafile-core" }
-metafile-dib = { path = "../metafile-dib" }
-metafile-emfplus = { path = "../metafile-emfplus" }
 serde.workspace = true
 
 [dev-dependencies]

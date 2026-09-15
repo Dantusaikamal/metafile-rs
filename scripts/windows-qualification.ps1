@@ -88,7 +88,9 @@ $cases = @(
     @{ Name = 'windows-emf-bitmap'; Extension = 'emf'; Profile = 'bitmap' },
     @{ Name = 'windows-emf-state'; Extension = 'emf'; Profile = 'vector' },
     @{ Name = 'windows-emf-affine'; Extension = 'emf'; Profile = 'bitmap' },
-    @{ Name = 'windows-emf-arc-matrix'; Extension = 'emf'; Profile = 'vector' }
+    @{ Name = 'windows-emf-arc-matrix'; Extension = 'emf'; Profile = 'vector' },
+    @{ Name = 'windows-gdiplus-emfplus-only'; Extension = 'emf'; Profile = 'text' },
+    @{ Name = 'windows-gdiplus-emfplus'; Extension = 'emf'; Profile = 'text' }
 )
 
 for ($index = 0; $index -lt $cases.Count; $index++) {

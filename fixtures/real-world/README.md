@@ -19,5 +19,6 @@ For maintainer-owned DOCX/PPTX files, use
 `scripts/extract-office-metafiles.ps1`. It extracts only `word/media` and
 `ppt/media` WMF/EMF entries and creates a reviewable manifest fragment with
 source-document and extracted-file SHA-256 hashes. EMF+ comments inside `.emf`
-members are classified as `emfplus` and marked unsupported. Do not commit the
+members are classified as `emfplus` and exercised through dedicated EMF+
+playback. Do not commit the
 results until provenance and redistribution permission have been verified.

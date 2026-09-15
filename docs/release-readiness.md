@@ -23,6 +23,10 @@ GitHub-hosted jobs or reference-renderer qualification as complete.
 - [x] common BI_RGB DIB structures and malformed cases have unit coverage
 - [x] WMF/EMF bitmap placement is reference-gated with interpolation-aware pixel tolerances and tight geometry bounds
 - [x] structured WASM error contract exercised at runtime
+- [x] initial EMF+ Only and Dual streams inspect and render through dedicated playback
+- [x] EMF+ object/record framing, continuation, transform, clip, text, and bitmap regressions are bounded
+- [ ] broad EMF+ Windows GDI+ reference matrix passes
+- [ ] independently sourced Office/DOCX EMF+ corpus populated
 - [x] README compatibility table reviewed against implementation
 - [x] production dependency purposes documented
 - [x] no external WMF renderer or converter dependency
@@ -38,4 +42,6 @@ arc/inversion evidence, and GitHub-hosted CI confirmation for this change.
 The controlled local DOCX extraction workflow has been exercised with WMF,
 ordinary EMF, and EMF+ media. It validates discovery, hashing, and
 classification, but project-controlled data does not satisfy either independent
-Office corpus gate.
+Office corpus gate. Initial EMF+ playback is reviewable but is not yet a
+production-readiness claim; richer brushes, images, regions, text layout, and
+the GDI+ reference matrix remain release blockers.

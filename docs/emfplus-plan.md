@@ -1,8 +1,8 @@
 # EMF+ implementation plan
 
-This is the pre-implementation plan for EMF+. None of the records below are
-currently played back. EMF+ Only and EMF+ Dual streams are inspected,
-structurally bounded, and rejected by rendering.
+This document records the staged design. P0 now has an initial implementation;
+the exact implemented/approximate/unsupported status is maintained in
+`emfplus-record-audit.md`. P1 and P2 remain roadmap work.
 
 ## Current-core fit
 

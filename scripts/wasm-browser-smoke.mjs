@@ -26,15 +26,15 @@ try {
   const emfSecond = metafileToSvg(emf, { strict: false });
   const emfplus = new Uint8Array(await (await fetch('/fixture.emfplus')).arrayBuffer());
   const emfplusInfo = inspectMetafile(emfplus);
-  let emfplusRejected = false;
-  try { metafileToSvg(emfplus, { strict: false }); } catch (error) { emfplusRejected = error?.code === 'unsupported_feature'; }
+  const emfplusFirst = metafileToSvg(emfplus, { strict: false });
+  const emfplusSecond = metafileToSvg(emfplus, { strict: false });
   let aliasesRejectEmf = 0;
   for (const call of [() => inspectWmf(emf), () => wmfToSvg(emf, { strict: false })]) {
     try { call(); } catch (error) { if (error?.code === 'format_mismatch') aliasesRejectEmf++; }
   }
   let structured = false;
   try { inspectMetafile(new Uint8Array([1, 2, 3])); } catch (error) { structured = typeof error?.code === 'string' && typeof error?.message === 'string'; }
-  if (info.format !== 'wmf' || !first.svg.includes('<svg') || first.svg !== second.svg || emfInfo.format !== 'emf' || !emfFirst.svg.includes('<svg') || emfFirst.svg !== emfSecond.svg || emfplusInfo.format !== 'emfplus' || !emfplusRejected || aliasesRejectEmf !== 2 || !structured) throw new Error('contract assertion failed');
+  if (info.format !== 'wmf' || !first.svg.includes('<svg') || first.svg !== second.svg || emfInfo.format !== 'emf' || !emfFirst.svg.includes('<svg') || emfFirst.svg !== emfSecond.svg || emfplusInfo.format !== 'emfplus' || !emfplusFirst.svg.includes('<text') || emfplusFirst.svg !== emfplusSecond.svg || aliasesRejectEmf !== 2 || !structured) throw new Error('contract assertion failed');
   document.body.textContent = 'PASS';
 } catch (error) { document.body.textContent = 'FAIL: ' + (error?.stack || error); }
 </script>`;

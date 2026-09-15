@@ -4,6 +4,7 @@ members = [
     "crates/metafile-dib",
     "crates/metafile-wmf",
     "crates/metafile-emf",
+    "crates/metafile-emfplus",
     "crates/metafile-svg",
     "crates/metafile",
     "bindings/wasm",

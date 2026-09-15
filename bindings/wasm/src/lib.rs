@@ -47,6 +47,11 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         | metafile_core::MetafileError::UnsupportedBitmap { record_index, .. } => {
             (None, Some(*record_index))
         }
+        metafile_core::MetafileError::InvalidEmfPlus {
+            offset,
+            outer_record_index,
+            ..
+        } => (Some(*offset), Some(*outer_record_index)),
         _ => (None, None),
     };
     let code = match &e {
@@ -65,6 +70,7 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         metafile_core::MetafileError::InvalidBitmap { .. } => "invalid_bitmap",
         metafile_core::MetafileError::UnsupportedBitmap { .. } => "unsupported_bitmap",
         metafile_core::MetafileError::UnsupportedCriticalFeature(_) => "unsupported_feature",
+        metafile_core::MetafileError::InvalidEmfPlus { .. } => "invalid_emf_plus",
         metafile_core::MetafileError::SvgGeneration(_) => "svg_generation",
     };
     js(&ErrorPayload {

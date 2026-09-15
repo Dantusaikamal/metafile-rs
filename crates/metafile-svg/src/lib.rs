@@ -3,8 +3,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{
     ArcKind, Bitmap, BitmapPlacement, BitmapSampling, Brush, BrushStyle, ClipRegion, Color,
-    HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Path, PathSegment, Pen, PenStyle,
-    Point, Rect, Renderer, ResourceLimits, Result, TextRun, VerticalTextAlignment,
+    HorizontalTextAlignment, LineCap, LineJoin, MetafileError, Paint, Path, PathSegment, Pen,
+    PenStyle, Point, Rect, Renderer, ResourceLimits, Result, Stroke, TextRun,
+    VerticalTextAlignment,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -16,6 +17,8 @@ pub struct SvgRenderer {
     bounds: Option<Rect>,
     next_clip_id: u32,
     clip_ids: BTreeMap<String, u32>,
+    next_paint_id: u32,
+    paint_ids: BTreeMap<String, u32>,
     output_bytes: usize,
     limits: ResourceLimits,
 }
@@ -29,6 +32,8 @@ impl SvgRenderer {
             bounds: None,
             next_clip_id: 0,
             clip_ids: BTreeMap::new(),
+            next_paint_id: 0,
+            paint_ids: BTreeMap::new(),
             output_bytes: 0,
             limits,
         }
@@ -177,6 +182,35 @@ impl SvgRenderer {
             clip_element(region)
         ));
         id
+    }
+
+    fn paint_reference(&mut self, paint: &Paint) -> String {
+        if let Paint::Solid(color) = paint {
+            return color.css();
+        }
+        let key = paint_key(paint);
+        if let Some(id) = self.paint_ids.get(&key) {
+            return format!("url(#paint{id})");
+        }
+        let id = self.next_paint_id;
+        self.next_paint_id += 1;
+        self.paint_ids.insert(key, id);
+        let definition = match paint {
+            Paint::Solid(_) => unreachable!(),
+            Paint::Hatch {
+                style,
+                foreground,
+                background,
+            } => hatch_definition(id, *style, *foreground, *background),
+            Paint::LinearGradient {
+                start,
+                end,
+                stops,
+                wrap_mode,
+            } => gradient_definition(id, *start, *end, stops, *wrap_mode),
+        };
+        self.definitions.push(definition);
+        format!("url(#paint{id})")
     }
 }
 
@@ -357,6 +391,89 @@ impl Renderer for SvgRenderer {
             stroke_bounds(points_bounds(&points), &actual_pen),
         )
     }
+    fn styled_path(
+        &mut self,
+        path: &Path,
+        stroke: Option<&Stroke>,
+        fill: Option<&Paint>,
+        fill_mode: u16,
+        clip: Option<&ClipRegion>,
+    ) -> Result<()> {
+        let data = path_data(path)?;
+        let points = path_points(path);
+        if points.is_empty() {
+            return Ok(());
+        }
+        let fill = fill.map_or_else(|| "none".into(), |paint| self.paint_reference(paint));
+        let (stroke_paint, stroke_width, cap, join, miter, dash, dash_offset) = stroke.map_or_else(
+            || {
+                (
+                    "none".into(),
+                    0.0,
+                    "butt",
+                    "miter",
+                    4.0,
+                    String::new(),
+                    String::new(),
+                )
+            },
+            |stroke| {
+                let paint = self.paint_reference(&stroke.paint);
+                let cap = match stroke.line_cap {
+                    LineCap::Butt => "butt",
+                    LineCap::Round => "round",
+                    LineCap::Square => "square",
+                };
+                let join = match stroke.line_join {
+                    LineJoin::Miter => "miter",
+                    LineJoin::Round => "round",
+                    LineJoin::Bevel => "bevel",
+                };
+                let dash = (!stroke.dash_pattern.is_empty()).then(|| {
+                    format!(
+                        " stroke-dasharray=\"{}\"",
+                        stroke
+                            .dash_pattern
+                            .iter()
+                            .map(|value| n(*value))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                });
+                let dash_offset = (stroke.dash_offset != 0.0)
+                    .then(|| format!(" stroke-dashoffset=\"{}\"", n(stroke.dash_offset)));
+                (
+                    paint,
+                    stroke.width.max(0.0),
+                    cap,
+                    join,
+                    stroke.miter_limit,
+                    dash.unwrap_or_default(),
+                    dash_offset.unwrap_or_default(),
+                )
+            },
+        );
+        let rule = if fill_mode == 2 { "nonzero" } else { "evenodd" };
+        let clip = self.clip_attr(clip);
+        let bounds = stroke.map_or_else(
+            || points_bounds(&points),
+            |stroke| {
+                let pen = Pen {
+                    width: stroke.width,
+                    ..Pen::default()
+                };
+                stroke_bounds(points_bounds(&points), &pen)
+            },
+        );
+        self.push(
+            format!(
+                "<path d=\"{data}\" stroke=\"{stroke_paint}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\" stroke-miterlimit=\"{}\"{dash}{dash_offset} fill=\"{fill}\" fill-rule=\"{rule}\"{clip}/>",
+                n(stroke_width),
+                n(miter)
+            ),
+            bounds,
+        )
+    }
     fn rectangle(
         &mut self,
         rect: Rect,
@@ -507,6 +624,7 @@ impl Renderer for SvgRenderer {
         };
         let baseline = match run.vertical_align {
             VerticalTextAlignment::Top => "text-before-edge",
+            VerticalTextAlignment::Center => "central",
             VerticalTextAlignment::Bottom => "text-after-edge",
             VerticalTextAlignment::Baseline => "alphabetic",
         };
@@ -543,6 +661,9 @@ impl Renderer for SvgRenderer {
         };
         let (text_top, text_bottom) = match run.vertical_align {
             VerticalTextAlignment::Top => (run.position.y, run.position.y + size),
+            VerticalTextAlignment::Center => {
+                (run.position.y - size / 2.0, run.position.y + size / 2.0)
+            }
             VerticalTextAlignment::Bottom => (run.position.y - size, run.position.y),
             VerticalTextAlignment::Baseline => {
                 (run.position.y - size * 0.8, run.position.y + size * 0.2)
@@ -659,6 +780,117 @@ impl Renderer for SvgRenderer {
             points_bounds(&corners),
         )
     }
+}
+
+fn paint_key(paint: &Paint) -> String {
+    match paint {
+        Paint::Solid(color) => format!("s:{},{},{},{}", color.r, color.g, color.b, color.a),
+        Paint::Hatch {
+            style,
+            foreground,
+            background,
+        } => format!(
+            "h:{style}:{},{},{},{}:{},{},{},{}",
+            foreground.r,
+            foreground.g,
+            foreground.b,
+            foreground.a,
+            background.r,
+            background.g,
+            background.b,
+            background.a
+        ),
+        Paint::LinearGradient {
+            start,
+            end,
+            stops,
+            wrap_mode,
+        } => format!(
+            "g:{}:{}:{}:{}:{wrap_mode}:{}",
+            n(start.x),
+            n(start.y),
+            n(end.x),
+            n(end.y),
+            stops
+                .iter()
+                .map(|stop| format!(
+                    "{}:{},{},{},{}",
+                    n(stop.offset),
+                    stop.color.r,
+                    stop.color.g,
+                    stop.color.b,
+                    stop.color.a
+                ))
+                .collect::<Vec<_>>()
+                .join(";")
+        ),
+    }
+}
+
+fn hatch_definition(id: u32, style: u32, foreground: Color, background: Color) -> String {
+    let strokes = match style {
+        0 => "M 0 0 H 8 M 0 4 H 8",
+        1 => "M 0 0 V 8 M 4 0 V 8",
+        2 => "M -2 8 L 8 -2 M 2 10 L 10 2",
+        3 => "M -2 0 L 8 10 M 2 -2 L 10 6",
+        4 => "M 0 0 H 8 M 0 4 H 8 M 0 0 V 8 M 4 0 V 8",
+        _ => "M -2 8 L 8 -2 M 2 10 L 10 2 M -2 0 L 8 10 M 2 -2 L 10 6",
+    };
+    format!(
+        "<pattern id=\"paint{id}\" patternUnits=\"userSpaceOnUse\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"{}\"/><path d=\"{strokes}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\"/></pattern>",
+        background.css(),
+        foreground.css()
+    )
+}
+
+fn gradient_definition(
+    id: u32,
+    start: Point,
+    end: Point,
+    stops: &[metafile_core::GradientStop],
+    wrap_mode: u32,
+) -> String {
+    let spread = match wrap_mode {
+        0 => "pad",
+        1 | 3 => "reflect",
+        2 | 4 => "repeat",
+        _ => "pad",
+    };
+    let stops = stops.iter().fold(String::new(), |mut output, stop| {
+        write!(
+            output,
+            "<stop offset=\"{}\" stop-color=\"{}\"/>",
+            n(stop.offset.clamp(0.0, 1.0)),
+            stop.color.css()
+        )
+        .expect("writing to String cannot fail");
+        output
+    });
+    format!(
+        "<linearGradient id=\"paint{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" spreadMethod=\"{spread}\">{stops}</linearGradient>",
+        n(start.x),
+        n(start.y),
+        n(end.x),
+        n(end.y)
+    )
+}
+
+fn path_points(path: &Path) -> Vec<Point> {
+    let mut points = Vec::new();
+    for figure in &path.figures {
+        points.push(figure.start);
+        for segment in &figure.segments {
+            match *segment {
+                PathSegment::Line(point) => points.push(point),
+                PathSegment::Cubic {
+                    control1,
+                    control2,
+                    to,
+                } => points.extend([control1, control2, to]),
+            }
+        }
+    }
+    points
 }
 
 fn paint(pen: &Pen, brush: &Brush, fill_mode: u16) -> String {

@@ -2,7 +2,7 @@
 
 `metafile-core` owns format-neutral geometry, GDI-like state, graphics objects,
 resource limits, diagnostics, errors, render options, and renderer events.
-`metafile-wmf` and `metafile-emf` own bounded format parsing, header validation,
+`metafile-wmf`, `metafile-emf`, and `metafile-emfplus` own bounded format parsing, header validation,
 stateful playback, inspection, text decoding, and DIB decoding. They depend on
 core, not on an output backend. `metafile-svg` independently consumes
 renderer events and serializes deterministic self-contained SVG. The small
@@ -13,6 +13,12 @@ JavaScript values through that facade.
 The facade owns a format-neutral `MetafileInfo` envelope and nests
 parser-specific metadata, so adding EMF does not require changing the
 top-level inspection/render result shape.
+
+EMF+ records are reassembled across `EMR_GDICOMMENT` boundaries before bounded
+inner-record parsing. EMF+ owns its 64-slot object table, graphics state,
+Save/Restore/container stacks, page/world transforms, and Dual policy. The EMF
+container always routes a detected EMF+ stream to this player and never silently
+renders the ordinary-EMF Dual fallback.
 
 Metafile records never append SVG directly. Playback mutates a complete device
 context and emits mapped graphics primitives. This boundary is intended for
@@ -29,7 +35,7 @@ rectangles, while pen widths, text advances, radii, and other extents receive
 scale only. Output bounds are renderer-owned and include vector stroke width;
 text bounds remain explicitly approximate.
 
-## Pre-EMF+ core audit
+## Shared renderer vocabulary
 
 Reusable without format leakage: `Transform`, `Path`/figures/cubic segments,
 fill rules, alpha `Color`/`Bitmap`, affine `BitmapPlacement`, `BitmapSampling`,
@@ -37,11 +43,9 @@ text positioning, and rectangular/polygon/path/intersection clips. EMF+
 playback can therefore reuse geometry, transforms, image placement, limits,
 diagnostics, and the renderer boundary.
 
-Classic `Brush`, `Pen`, `Font`, and `DeviceContext` are deliberately not being
-treated as a complete GDI+ model. Paint-backed pens, gradients/textures,
-source-image rectangles and attributes, richer string layout, region boolean
-operations, containers, page units, and rendering-quality state need
-format-neutral renderer concepts during the dedicated EMF+ pass. Their exact
-ownership/resource representation is deferred until real object records drive
-tests; speculative EMF+ flags are not added to shared types. See
-`docs/emfplus-plan.md` for the P0/P1/P2 design boundary.
+Classic `Brush`, `Pen`, `Font`, and `DeviceContext` remain GDI types. EMF+ owns
+its richer objects and resolves them at draw time to format-neutral `Paint`,
+`Stroke`, `Path`, `TextRun`, `ClipRegion`, and affine `BitmapPlacement` values.
+Core currently represents solid/hatch/linear-gradient paint and rich stroke
+style; texture/path-gradient paint, boolean regions, image attributes, and
+advanced string layout remain explicit future vocabulary gaps.

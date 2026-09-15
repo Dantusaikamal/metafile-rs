@@ -22,4 +22,5 @@ not a Cargo dependency or distributable runtime component.
 
 `metafile-dib` is a first-party internal workspace crate shared by WMF and EMF;
 it is not an external dependency. No dependency parses, interprets, plays, or
-renders WMF/EMF records.
+renders WMF, EMF, or EMF+ records. `metafile-emfplus` adds no new third-party
+runtime dependency beyond the workspace's existing `serde` metadata support.

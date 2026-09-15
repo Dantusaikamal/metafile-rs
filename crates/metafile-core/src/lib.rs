@@ -194,6 +194,13 @@ pub struct ResourceLimits {
     pub max_objects: usize,
     pub max_points_per_record: usize,
     pub max_diagnostics: usize,
+    pub max_object_bytes: usize,
+    pub max_comment_bytes: usize,
+    pub max_gradient_stops: usize,
+    pub max_dash_entries: usize,
+    pub max_string_chars: usize,
+    pub max_region_nodes: usize,
+    pub max_container_depth: usize,
 }
 
 impl Default for ResourceLimits {
@@ -208,6 +215,13 @@ impl Default for ResourceLimits {
             max_objects: 16_384,
             max_points_per_record: 1_000_000,
             max_diagnostics: 256,
+            max_object_bytes: 16 * 1024 * 1024,
+            max_comment_bytes: 32 * 1024 * 1024,
+            max_gradient_stops: 16_384,
+            max_dash_entries: 16_384,
+            max_string_chars: 4 * 1024 * 1024,
+            max_region_nodes: 100_000,
+            max_container_depth: 256,
         }
     }
 }
@@ -287,6 +301,16 @@ pub enum MetafileError {
     },
     #[error("unsupported critical feature: {0}")]
     UnsupportedCriticalFeature(String),
+    #[error(
+        "invalid EMF+ record {inner_record_index} (type {record_type:#06x}) in outer EMF record {outer_record_index} at byte {offset}: {message}"
+    )]
+    InvalidEmfPlus {
+        outer_record_index: usize,
+        inner_record_index: usize,
+        record_type: u16,
+        offset: usize,
+        message: String,
+    },
     #[error("SVG generation failed: {0}")]
     SvgGeneration(String),
 }
@@ -355,6 +379,40 @@ pub enum BrushStyle {
 pub struct Brush {
     pub style: BrushStyle,
     pub color: Color,
+}
+
+/// Renderer-neutral paint used by formats with richer brushes than classic GDI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Paint {
+    Solid(Color),
+    Hatch {
+        style: u32,
+        foreground: Color,
+        background: Color,
+    },
+    LinearGradient {
+        start: Point,
+        end: Point,
+        stops: Vec<GradientStop>,
+        wrap_mode: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub offset: f64,
+    pub color: Color,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub paint: Paint,
+    pub width: f64,
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
+    pub miter_limit: f64,
+    pub dash_pattern: Vec<f64>,
+    pub dash_offset: f64,
 }
 impl Default for Brush {
     fn default() -> Self {
@@ -608,6 +666,7 @@ pub enum HorizontalTextAlignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerticalTextAlignment {
     Top,
+    Center,
     Bottom,
     Baseline,
 }
@@ -728,6 +787,14 @@ pub trait Renderer {
         fill_mode: u16,
         stroke: bool,
         fill: bool,
+        clip: Option<&ClipRegion>,
+    ) -> Result<()>;
+    fn styled_path(
+        &mut self,
+        path: &Path,
+        stroke: Option<&Stroke>,
+        fill: Option<&Paint>,
+        fill_mode: u16,
         clip: Option<&ClipRegion>,
     ) -> Result<()>;
     fn rectangle(

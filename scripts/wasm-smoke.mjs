@@ -41,11 +41,23 @@ if (emfInfo.format !== "emf" || !emfFirst.svg.includes("<svg") || emfFirst.svg !
 for (const fixture of ["windows-gdiplus-emfplus-only.emf", "windows-gdiplus-emfplus.emf"]) {
   const bytes = new Uint8Array(await readFile(new URL(`../fixtures/real-world/${fixture}`, import.meta.url)));
   if (inspectMetafile(bytes).format !== "emfplus") throw new Error(`${fixture} was not classified as EMF+`);
-  try {
-    metafileToSvg(bytes, { strict: false });
-    throw new Error(`${fixture} playback unexpectedly succeeded`);
-  } catch (error) {
-    if (error?.code !== "unsupported_feature") throw new Error(`${fixture} did not return structured unsupported playback`);
+  const first = metafileToSvg(bytes, { strict: false });
+  const second = metafileToSvg(bytes, { strict: false });
+  if (!first.svg.includes("<svg") || !first.svg.includes("<text") || first.svg !== second.svg) {
+    throw new Error(`${fixture} EMF+ playback failed or was nondeterministic`);
+  }
+}
+
+const malformedEmfPlus = new Uint8Array(await readFile(new URL("../fixtures/real-world/windows-gdiplus-emfplus-only.emf", import.meta.url)));
+const malformedText = new TextDecoder("latin1").decode(malformedEmfPlus);
+const signatureOffset = malformedText.indexOf("EMF+");
+new DataView(malformedEmfPlus.buffer).setUint32(signatureOffset + 8, 13, true);
+try {
+  inspectMetafile(malformedEmfPlus);
+  throw new Error("malformed EMF+ unexpectedly inspected successfully");
+} catch (error) {
+  if (error?.code !== "invalid_emf_plus" || typeof error?.offset !== "number") {
+    throw new Error("malformed EMF+ did not return structured inner-record context");
   }
 }
 

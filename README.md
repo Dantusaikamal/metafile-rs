@@ -5,9 +5,9 @@ Metafiles and rendering deterministic, self-contained SVG. It targets native
 Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
 converters, browser Canvas, or remote services.
 
-This release establishes substantial WMF support and a hardened ordinary-EMF
-engine. It is not a claim of complete Windows GDI compatibility. EMF+ is
-detected but its playback remains a roadmap feature.
+This release establishes substantial WMF and ordinary-EMF support plus an
+initial, deliberately bounded EMF+ parser and playback engine. It is not a
+claim of complete Windows GDI/GDI+ compatibility.
 
 The intended 1.0 engine supports WMF, ordinary EMF, and EMF+ through the same
 first-party native/WASM byte-to-SVG API with structured diagnostics. After it
@@ -49,7 +49,7 @@ level consumers can call `metafile_wmf::playback` with any
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
 | Ordinary EMF | Partial | Validated headers, world/mapping transforms, common vectors/paths, transformed polygon/path clips, Unicode/ANSI text, and affine BI_RGB StretchDIBits are rendered. Arbitrary-affine text and non-uniform geometric pens remain explicit approximations. See `docs/emf-record-audit.md`. |
-| EMF+ | Classified, playback unsupported | Embedded EMF+ comments produce `MetafileFormat::EmfPlus`; playback fails explicitly instead of ignoring the stream. |
+| EMF+ | Initial subset | EMF+ Only and Dual streams use dedicated playback for common objects, vector paths, transforms/state, basic clipping, raw ARGB bitmaps, and DrawString. Unsupported features are diagnostic or strict errors; the ordinary-EMF Dual fallback is never silently substituted. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
 permissive mode. In strict mode, an unknown operation or a known operation
@@ -68,15 +68,16 @@ evidence of pixel-perfect Windows GDI equivalence.
 ## Architecture
 
 ```text
-metafile-wmf / metafile-emf -> stateful GDI playback -> metafile-core Renderer events
-metafile-svg -----------------------------------------------> SVG
+metafile-wmf / metafile-emf / metafile-emfplus -> stateful playback
+                                      -> metafile-core Renderer events
+metafile-svg                         -> deterministic SVG
 metafile facade composes playback + SVG rendering
 bindings/wasm: Uint8Array/bytes -> structured metadata/render result
 ```
 
 See [docs/architecture.md](docs/architecture.md),
-[docs/dependencies.md](docs/dependencies.md), and the evidence-based plan for
-the next pass in [docs/emfplus-plan.md](docs/emfplus-plan.md).
+[docs/dependencies.md](docs/dependencies.md), and the evidence-based
+[EMF+ record audit](docs/emfplus-record-audit.md).
 
 ## Security
 
