@@ -17,7 +17,7 @@ diagnostics. `emf-to-png` continues to own Node `Buffer`, filesystem access,
 requested output dimensions, fit, DPI policy, background compositing,
 PNG/JPEG encoding, fallback images, logging, and CLI behavior.
 
-The byte-to-SVG integration surface is frozen for the converter pass. Current
+The byte-to-SVG integration surface is frozen. Current
 P2 fidelity gaps (notably EMF+ path gradients, custom/compound pen caps, and
 exact Windows text shaping) remain structured diagnostics/strict errors and do
 not require exposing parser internals to JavaScript.
@@ -53,18 +53,14 @@ and should be returned/logged according to existing package policy. Strict mode
 turns materially unsupported semantics into failures; permissive mode emits a
 diagnostic and safely skips or documents an approximation.
 
-## Migration
+## Published integration
 
-1. Add a private renderer adapter initialized once and cover all existing Node
-   API defaults with contract tests.
-2. Route WMF to metafile-rs first while retaining the legacy ordinary-EMF
-   renderer behind an explicit internal switch.
-3. Compare SVG/raster results for the qualification corpus, then route ordinary
-   EMF and supported EMF+.
-4. If a temporary fallback remains, make its selection explicit in diagnostics;
-   never present an EMF+ Dual ordinary-EMF fallback as full EMF+ fidelity.
-5. Remove `libemf2svg` only after the published package matrix and real Office
-   corpus gates pass.
+`emf-to-png` 1.0.0 implements this contract with one cached WASM
+initialization promise per JavaScript realm. WMF, ordinary EMF, EMF+ Only, and
+EMF+ Dual all route through `metafile-rs`; the legacy `libemf2svg` runtime and
+build machinery have been removed. The npm package vendors qualified generated
+artifacts from `metafile-rs` 1.0.1, so installation and runtime do not require
+this source repository, Rust, or network access.
 
 ## Browser future
 

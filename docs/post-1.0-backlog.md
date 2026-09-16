@@ -27,7 +27,9 @@ shows it is common.
 - add a regression fixture for every real-file rendering or security defect;
 - tune performance only from measured representative workloads.
 
-## Release blockers still external to this local pass
+## Ongoing qualification
 
-- the resulting commit must pass the configured GitHub-hosted Linux, macOS,
-  Windows, WASM, browser, and Windows-reference jobs before publication.
+Every maintenance release must pass the configured GitHub-hosted Linux,
+macOS, Windows, WASM, browser, and Windows-reference jobs. Remaining items in
+this document are not release blockers unless reproducible corpus evidence
+shows that they affect common document workloads.

@@ -1,4 +1,8 @@
-# EMF+ implementation plan
+# EMF+ implementation plan (historical)
+
+This document records the design plan used to implement EMF+ before the 1.0.1
+release. It is retained for architectural context, not as a current roadmap.
+See `emfplus-record-audit.md` and `post-1.0-backlog.md` for current status.
 
 This document records the staged design. P0 now has an initial implementation;
 the exact implemented/approximate/unsupported status is maintained in

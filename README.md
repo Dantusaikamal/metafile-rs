@@ -10,11 +10,10 @@ workloads, with structured diagnostics for unsupported or approximate edge
 cases. It is not a claim of universal or pixel-perfect Windows GDI/GDI+
 compatibility.
 
-The engine supports WMF, ordinary EMF, and EMF+ through the same
-first-party native/WASM byte-to-SVG API with structured diagnostics. After it
-is integrated, `emf-to-png` is intended to use this backend for
-WMF/EMF/EMF+ to SVG/PNG/JPEG without Office, LibreOffice, Inkscape, Canvas, or
-an external conversion process. This is a roadmap, not a capability claim.
+The engine supports WMF, ordinary EMF, and EMF+ through the same first-party
+native/WASM byte-to-SVG API. It powers `emf-to-png` 1.0.0 for server-side
+WMF/EMF/EMF+ to SVG, PNG, and JPEG conversion without Office, LibreOffice,
+Inkscape, Canvas, or an external conversion process.
 
 ## Rust API
 
@@ -26,10 +25,10 @@ std::fs::write("drawing.svg", result.svg)?;
 ```
 
 `RenderResult` includes SVG, format-neutral `MetafileInfo` (with nested
-`FormatSpecificInfo::Wmf` or `FormatSpecificInfo::Emf` details), and non-fatal diagnostics.
-`RenderOptions` provides strict mode and configurable resource limits. Lower
-level consumers can call `metafile_wmf::playback` with any
-`metafile_core::Renderer` without depending on the SVG backend.
+format-specific details), and non-fatal diagnostics. `RenderOptions` provides
+strict mode and configurable resource limits. Lower-level consumers can use
+the format crates with any `metafile_core::Renderer` implementation without
+depending on the SVG backend.
 
 ## WMF compatibility
 
@@ -41,7 +40,7 @@ level consumers can call `metafile_wmf::playback` with any
 | MM_TEXT and metric/English/TWIPS map modes | Supported | Includes inverted Y axes; physical conversion assumes 96 SVG units per inch. |
 | MM_ISOTROPIC / MM_ANISOTROPIC | Supported | Explicit window/viewport origins, extents, offsets, and scaling are applied. |
 | Lines and common vector shapes | Supported | Line, polyline, polygon, rectangle, round rectangle, ellipse, and pixel. |
-| Arc / pie / chord | Partial | Projection, direction, mapping inversion, closure and full ellipses are unit-tested; a limited GDI-produced Windows case passes visual/metric review, but the exhaustive matrix is incomplete. |
+| Arc / pie / chord | Partial | Projection, direction, mapping inversion, closure, and full ellipses are unit-tested and covered by broad project-owned Windows reference matrices; exhaustive historical combinations are not claimed. |
 | PolyPolygon | Supported | One compound path preserves ALTERNATE/even-odd and WINDING/nonzero fill behavior; a GDI-produced nested-hole case is reference-compared. |
 | TextOut / ExtTextOut | Partial | Charset decoding, distinct horizontal/vertical alignment, style, escapement, `dx`, UPDATECP, clipping and opaque rectangles are supported; font metrics and no-`dx` advance remain approximate and diagnostic. |
 | Rectangular clipping | Partial | Intersect and saved/restored rectangular clips are supported; exclusion/region clips are diagnostic-only. |
@@ -60,8 +59,8 @@ fail strict rendering.
 
 Standard WMFs have their SVG viewBox inferred from emitted drawing extents.
 Files with no drawable operations receive a 1x1 fallback viewBox and an
-explicit diagnostic that bounds are unreliable. Compatibility is being
-qualified against a provenance-controlled corpus. The committed corpus
+explicit diagnostic that bounds are unreliable. Compatibility is qualified
+against a provenance-controlled corpus. The committed corpus
 contains project-generated Windows GDI outputs plus an ignored, maintainer-owned
 private Office corpus. Public redistributable Office evidence remains limited.
 Passing generated or private cases is not evidence of pixel-perfect Windows
@@ -79,7 +78,8 @@ bindings/wasm: Uint8Array/bytes -> structured metadata/render result
 
 See [docs/architecture.md](docs/architecture.md),
 [docs/dependencies.md](docs/dependencies.md), and the evidence-based
-[EMF+ record audit](docs/emfplus-record-audit.md).
+[WMF](docs/wmf-record-audit.md), [EMF](docs/emf-record-audit.md), and
+[EMF+](docs/emfplus-record-audit.md) record audits.
 
 ## Security
 
@@ -94,8 +94,10 @@ input returns typed errors and the workspace forbids unsafe Rust.
 `metafileToSvg(Uint8Array, options?)`; `inspectWmf` and `wmfToSvg` remain
 WMF-specific compatibility APIs and reject EMF with a structured
 `format_mismatch` error. The generated wasm-bindgen loader is
-responsible for initialization; the engine itself performs no fetch, filesystem,
-DOM, Canvas, or Node operations. No npm package is included yet.
+responsible for initialization; the engine itself performs no fetch,
+filesystem, DOM, Canvas, or Node operations. This repository does not publish
+an npm package; `emf-to-png` bundles qualified generated artifacts from the
+tagged engine release.
 
 ```bash
 node scripts/build-wasm.mjs
@@ -117,8 +119,12 @@ A cargo-fuzz target is provided under `fuzz/`. Real-world fixtures belong in
 permission in `fixtures/manifest.json`; private files can live in ignored
 `fixtures/private/` or `METAFILE_FIXTURE_DIR`. See
 [docs/release-readiness.md](docs/release-readiness.md) for the evidence gates
-and remaining hosted-CI/public-corpus boundaries.
+used for 1.0.1 and the remaining public-corpus limitation.
+
+Contributions are welcome when they are driven by reproducible compatibility,
+security, performance, or documentation issues. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before submitting code or fixtures.
 
 ## License
 
-Licensed under either Apache-2.0 or MIT, at your option.
+Licensed under the [Apache License 2.0](LICENSE).

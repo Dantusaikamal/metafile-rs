@@ -11,8 +11,8 @@ renderer events and serializes deterministic self-contained SVG. The small
 JavaScript values through that facade.
 
 The facade owns a format-neutral `MetafileInfo` envelope and nests
-parser-specific metadata, so adding EMF does not require changing the
-top-level inspection/render result shape.
+parser-specific metadata. WMF, ordinary EMF, and EMF+ therefore share the
+same top-level inspection and render result shape.
 
 EMF+ records are reassembled across `EMR_GDICOMMENT` boundaries before bounded
 inner-record parsing. EMF+ owns its 64-slot object table, graphics state,
@@ -23,8 +23,8 @@ diagnostic empty-Only compatibility form; unsupported drawing records never
 cause an implicit fallback.
 
 Metafile records never append SVG directly. Playback mutates a complete device
-context and emits mapped graphics primitives. This boundary is intended for
-future EMF+ playback and other renderer backends.
+context and emits mapped graphics primitives. WMF, EMF, and EMF+ all use this
+boundary, which also permits future renderer backends.
 
 Affine world transforms, generic line/cubic path figures, fill-rule-aware polygon/path clip
 regions, and affine bitmap placement are format-neutral core concepts. EMF
@@ -42,7 +42,7 @@ text bounds remain explicitly approximate.
 Reusable without format leakage: `Transform`, `Path`/figures/cubic segments,
 fill rules, alpha `Color`/`Bitmap`, affine `BitmapPlacement`, `BitmapSampling`,
 text positioning, and rectangular/polygon/path/intersection clips. EMF+
-playback can therefore reuse geometry, transforms, image placement, limits,
+playback reuses geometry, transforms, image placement, limits,
 diagnostics, and the renderer boundary.
 
 Classic `Brush`, `Pen`, `Font`, and `DeviceContext` remain GDI types. EMF+ owns

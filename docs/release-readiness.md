@@ -1,15 +1,16 @@
-# 1.0.1 release-readiness gates
+# 1.0.1 qualification record
 
-This checklist records evidence, not intent. Local results do not mark remote
-GitHub-hosted jobs or reference-renderer qualification as complete.
+This checklist records the evidence used to release `metafile-rs` 1.0.1. The
+release is available at
+<https://github.com/Dantusaikamal/metafile-rs/releases/tag/v1.0.1>.
 
 | Format | Engine implementation | Windows reference | Independent Office | Verdict |
 | --- | --- | --- | --- | --- |
 | WMF | Common document subset implemented and regression-tested | Six project-owned cases and six private Office-extracted standard WMFs pass locally | Private legacy-Office validation complete; public redistributable corpus missing | READY WITH DOCUMENTED LIMITATIONS |
 | ordinary EMF | Common vectors/state/text/BI_RGB implemented and regression-tested | Eight project-owned and six private Office-extracted cases pass locally | Private legacy-Office validation complete; public redistributable corpus missing | READY WITH DOCUMENTED LIMITATIONS |
-| EMF+ | Common vectors/state/text/images/brushes/regions implemented; explicit P2 gaps remain | Seven project-owned plus private Only/Dual cases pass locally | Private legacy-Office validation complete; public redistributable corpus missing | READY WITH DOCUMENTED LIMITATIONS; hosted verification pending |
+| EMF+ | Common vectors/state/text/images/brushes/regions implemented; explicit P2 gaps remain | Seven project-owned plus private Only/Dual cases pass locally | Private legacy-Office validation complete; public redistributable corpus missing | READY WITH DOCUMENTED LIMITATIONS |
 
-- [ ] GitHub CI green on Linux, macOS, and Windows for these qualification changes (the base commit was green)
+- [x] GitHub CI green on Linux, macOS, and Windows for the release commit
 - [x] Rust 1.88 MSRV commands pass locally
 - [x] current stable (1.98.1 during this pass) commands pass locally and are in CI
 - [x] `wasm32-unknown-unknown` release build passes locally
@@ -46,9 +47,9 @@ See `qualification-2026-09-11.md`, `qualification-2026-09-12-emf.md`,
 `qualification-2026-09-14-foundation.md`, and
 `qualification-2026-09-15-emfplus.md`, plus
 `qualification-2026-09-16-office-corpus.md`, for exact evidence and blockers. The
-public facade uses a format-neutral metadata envelope. Publishing remains blocked
-on GitHub-hosted CI confirmation for this change. Public redistributable Office
-corpus gates remain unverified qualification work, not fabricated evidence.
+public facade uses a format-neutral metadata envelope. Public redistributable
+Office corpus gates remain unverified qualification work, not fabricated
+evidence.
 
 The controlled extraction workflow has now been exercised with project-owned
 DOCX media and private legacy-Office OfficeArt WMF/EMF/EMF+ BLIPs. The private

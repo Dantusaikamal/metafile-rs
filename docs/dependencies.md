@@ -1,5 +1,10 @@
 # Runtime dependencies
 
+`metafile-rs` itself is licensed under Apache-2.0. Third-party dependencies
+retain their own licenses; changing the project's license does not relicense
+them. Exact resolved versions are recorded in `Cargo.lock`, and Cargo package
+metadata is the source of truth for their license declarations.
+
 - `thiserror`: typed Rust error declarations without handwritten boilerplate.
 - `serde`: stable structured metadata, diagnostics, options, and WASM results.
 - `encoding_rs`: maintained legacy Windows code-page decoding for WMF and EMF text.
