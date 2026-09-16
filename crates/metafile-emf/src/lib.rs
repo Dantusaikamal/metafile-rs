@@ -83,8 +83,36 @@ pub fn playback(
     if parsed.info.contains_emf_plus {
         let comments = emf_plus_comments(&parsed.records)?;
         let canvas = frame_device_bounds(&parsed.info).unwrap_or(parsed.info.bounds);
+        let classic_playback = metafile_emfplus::classic_playback(&comments, &options.limits)?;
         let result = metafile_emfplus::playback(&comments, options, canvas, renderer)?;
         diagnostics.extend(result.diagnostics);
+        if let Some(classic_playback) = classic_playback {
+            let (code, message) = match classic_playback {
+                metafile_emfplus::ClassicPlayback::DualGetDc => (
+                    "emfplus_dual_getdc_fallback",
+                    "EMF+ Dual stream delegates all visible drawing through GetDC; ordinary EMF records were played explicitly",
+                ),
+                metafile_emfplus::ClassicPlayback::NoncanonicalEmptyOnly => {
+                    if options.strict {
+                        return Err(MetafileError::UnsupportedCriticalFeature(
+                            "EMF+ Only stream contains no drawing records but has ordinary EMF content"
+                                .into(),
+                        ));
+                    }
+                    (
+                        "emfplus_noncanonical_empty_only_fallback",
+                        "EMF+ Only stream contains no drawing records; ordinary EMF records were played for compatibility with Windows",
+                    )
+                }
+            };
+            diagnostics.push(Diagnostic::warning(code, message));
+            let mut player = Player::new(options.limits.clone());
+            for record in &parsed.records {
+                if record.kind != EMR_GDICOMMENT {
+                    player.play(*record, renderer, &mut diagnostics, options.strict)?;
+                }
+            }
+        }
     } else {
         let mut player = Player::new(options.limits.clone());
         for record in &parsed.records {
@@ -321,7 +349,7 @@ fn parse<'a>(bytes: &'a [u8], limits: &ResourceLimits) -> Result<Parsed<'a>> {
         warnings.push(Diagnostic::warning(
             "emf_plus_present",
             if emf_plus.dual {
-                "EMR_GDICOMMENT contains an EMF+ Dual stream; EMF+ is the selected playback stream"
+                "EMR_GDICOMMENT contains an EMF+ Dual stream; dedicated EMF+ playback is preferred unless GetDC explicitly delegates a state-only stream"
             } else {
                 "EMR_GDICOMMENT contains an EMF+ Only stream"
             },
@@ -1150,7 +1178,14 @@ impl Player {
     fn select_object(&mut self, payload: &[u8], record_index: usize, base: usize) -> Result<()> {
         let handle = read_u32(payload, 0, base)?;
         let object = if handle & 0x8000_0000 != 0 {
-            stock_object(handle & 0x7fff_ffff).ok_or(MetafileError::InvalidObjectHandle {
+            let index = handle & 0x7fff_ffff;
+            // DEFAULT_PALETTE has no renderer-visible state in the current
+            // true-color SVG pipeline, but is a valid stock selection and
+            // must not be mistaken for an object-table handle.
+            if index == 15 {
+                return Ok(());
+            }
+            stock_object(index).ok_or(MetafileError::InvalidObjectHandle {
                 handle,
                 record_index,
             })?
@@ -1182,6 +1217,16 @@ impl Player {
 
     fn delete_object(&mut self, payload: &[u8], record_index: usize, base: usize) -> Result<()> {
         let handle = read_u32(payload, 0, base)?;
+        if handle & 0x8000_0000 != 0 {
+            let index = handle & 0x7fff_ffff;
+            if stock_object(index).is_some() || index == 15 {
+                return Ok(());
+            }
+            return Err(MetafileError::InvalidObjectHandle {
+                handle,
+                record_index,
+            });
+        }
         let object = self
             .objects
             .remove(&handle)
@@ -2260,6 +2305,18 @@ fn stock_object(index: u32) -> Option<GdiObject> {
             style: BrushStyle::Solid,
             color: Color::WHITE,
         }),
+        1 => GdiObject::Brush(Brush {
+            style: BrushStyle::Solid,
+            color: Color::rgb(192, 192, 192),
+        }),
+        2 => GdiObject::Brush(Brush {
+            style: BrushStyle::Solid,
+            color: Color::rgb(128, 128, 128),
+        }),
+        3 => GdiObject::Brush(Brush {
+            style: BrushStyle::Solid,
+            color: Color::rgb(64, 64, 64),
+        }),
         4 => GdiObject::Brush(Brush {
             style: BrushStyle::Solid,
             color: Color::BLACK,
@@ -2277,7 +2334,11 @@ fn stock_object(index: u32) -> Option<GdiObject> {
             style: PenStyle::Null,
             ..Pen::default()
         }),
-        10..=17 => GdiObject::Font(Font::default()),
+        10 | 11 | 16 => GdiObject::Font(Font {
+            family: "monospace".into(),
+            ..Font::default()
+        }),
+        12..=14 | 17 => GdiObject::Font(Font::default()),
         18 => GdiObject::Brush(Brush::default()),
         19 => GdiObject::Pen(Pen::default()),
         _ => return None,

@@ -3,8 +3,11 @@
 This audit describes playback, not merely parsing. Unsupported semantics are
 diagnosed in permissive mode and rejected in strict mode when used. Unsupported
 object definitions retain their object-table slots and do not fail unless a
-visible record selects them. EMF+ Dual uses its EMF+ stream; the classic EMF
-fallback is never silently substituted.
+visible record selects them. EMF+ uses its dedicated stream except for two
+explicit, diagnostic compatibility forms validated against Windows: a
+state-only Dual stream that delegates through `GetDC`, and a noncanonical empty
+Only stream accepted only in permissive mode. An unsupported drawing record
+never triggers a classic fallback.
 
 ## Implemented and rendered
 
@@ -34,6 +37,13 @@ fallback is never silently substituted.
 
 The five project-owned P1 fixtures exercise these paths against Windows GDI+.
 They supplement the original EMF+ Only and Dual fixtures.
+
+Some legacy Office producers emit a 12-byte `SetPageTransform` record with no
+serialized `PageScale`. Windows GDI+ renders the private real-file instance and
+a controlled canonical/noncanonical pair identically, establishing an
+effective default scale of 1.0. Permissive playback accepts only that narrow
+zero-data form and emits `emfplus_noncanonical_set_page_transform`; strict
+playback rejects it. Other truncated forms remain malformed.
 
 ## Approximate, always diagnostic where material
 
@@ -77,6 +87,7 @@ bound comment/record/object bytes, points, strings, gradient stops, dash data,
 region nodes/depth, state/container depth, decoded pixels, diagnostics, and SVG
 output. PNG/JPEG dimensions are checked before accepting decoded allocations.
 
-Local Windows qualification covers 21 total WMF/EMF/EMF+ cases, including
-seven EMF+ cases. Independent Office-derived EMF+ evidence and hosted CI remain
-separate, explicitly unchecked gates.
+Local Windows qualification covers 21 project-owned WMF/EMF/EMF+ cases,
+including seven EMF+ cases. Private real-Office qualification additionally
+covers EMF+ Only and Dual streams; public redistributable Office evidence and
+hosted CI remain separate gates.

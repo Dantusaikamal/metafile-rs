@@ -186,6 +186,51 @@ fn creates_selects_and_deletes_objects() {
 }
 
 #[test]
+fn dual_getdc_with_compact_page_transform_uses_classic_records_explicitly() {
+    let input = emf(&[
+        emf_plus_comment(
+            true,
+            &[
+                emf_plus_record(0x4030, 1, &[]),
+                emf_plus_record(0x4004, 0, &[]),
+            ],
+        ),
+        record(27, &i32s(&[5, 10])),
+        record(54, &i32s(&[25, 30])),
+    ]);
+    let (svg, diagnostics) = render(&input, false).unwrap();
+    assert!(svg.contains("M 5 10 L 25 30"), "{svg}");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "emfplus_noncanonical_set_page_transform" }));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "emfplus_dual_getdc_fallback"));
+    assert!(matches!(
+        render(&input, true),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
+}
+
+#[test]
+fn empty_noncanonical_only_stream_uses_classic_records_only_in_permissive_mode() {
+    let input = emf(&[
+        record(27, &i32s(&[5, 10])),
+        record(54, &i32s(&[25, 30])),
+        emf_plus_comment(false, &[]),
+    ]);
+    let (svg, diagnostics) = render(&input, false).unwrap();
+    assert!(svg.contains("M 5 10 L 25 30"), "{svg}");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "emfplus_noncanonical_empty_only_fallback" }));
+    assert!(matches!(
+        render(&input, true),
+        Err(MetafileError::UnsupportedCriticalFeature(_))
+    ));
+}
+
+#[test]
 fn extended_pen_preserves_derived_cap_and_join() {
     let mut pen = vec![0; 44];
     pen[0..4].copy_from_slice(&1u32.to_le_bytes());
@@ -498,6 +543,84 @@ fn object_player(handle: u32, object: GdiObject) -> Player {
     let mut player = Player::new(ResourceLimits::default());
     player.add_object(handle, object, 1).unwrap();
     player
+}
+
+#[test]
+fn selects_defined_stock_brush_pen_font_and_palette_handles() {
+    let mut player = object_player(
+        1,
+        GdiObject::Brush(Brush {
+            style: BrushStyle::Solid,
+            color: Color::rgb(1, 2, 3),
+        }),
+    );
+    player
+        .select_object(&0x8000_0001u32.to_le_bytes(), 2, 0)
+        .unwrap();
+    assert_eq!(player.dc.core.brush.color, Color::rgb(192, 192, 192));
+    assert_eq!(player.dc.selected_brush, None);
+
+    player
+        .select_object(&0x8000_0006u32.to_le_bytes(), 3, 0)
+        .unwrap();
+    assert_eq!(player.dc.core.pen.color, Color::WHITE);
+    assert_eq!(player.dc.selected_pen, None);
+
+    player
+        .select_object(&0x8000_000bu32.to_le_bytes(), 4, 0)
+        .unwrap();
+    assert_eq!(player.dc.core.font.family, "monospace");
+    assert_eq!(player.dc.selected_font, None);
+
+    let before = player.objects.len();
+    player
+        .select_object(&0x8000_000fu32.to_le_bytes(), 5, 0)
+        .unwrap();
+    assert_eq!(player.objects.len(), before);
+}
+
+#[test]
+fn stock_selection_restore_and_custom_reselection_preserve_object_table() {
+    let custom = Brush {
+        style: BrushStyle::Solid,
+        color: Color::rgb(10, 20, 30),
+    };
+    let mut player = object_player(1, GdiObject::Brush(custom.clone()));
+    player.select_object(&1u32.to_le_bytes(), 2, 0).unwrap();
+    player.save_dc().unwrap();
+    player
+        .select_object(&0x8000_0004u32.to_le_bytes(), 3, 0)
+        .unwrap();
+    assert_eq!(player.dc.core.brush.color, Color::BLACK);
+    player.restore_dc(&(-1i32).to_le_bytes(), 4, 0).unwrap();
+    assert_eq!(player.dc.core.brush, custom);
+    assert_eq!(player.dc.selected_brush, Some(1));
+
+    player
+        .select_object(&0x8000_0001u32.to_le_bytes(), 5, 0)
+        .unwrap();
+    player.select_object(&1u32.to_le_bytes(), 6, 0).unwrap();
+    player
+        .delete_object(&0x8000_0001u32.to_le_bytes(), 7, 0)
+        .unwrap();
+    assert_eq!(player.objects.len(), 1);
+    assert_eq!(player.dc.selected_brush, Some(1));
+}
+
+#[test]
+fn invalid_stock_handle_is_rejected_without_affecting_reuse() {
+    let mut player = object_player(1, GdiObject::Pen(Pen::default()));
+    assert!(matches!(
+        player.select_object(&0x8000_1234u32.to_le_bytes(), 2, 0),
+        Err(MetafileError::InvalidObjectHandle {
+            handle: 0x8000_1234,
+            record_index: 2
+        })
+    ));
+    player.delete_object(&1u32.to_le_bytes(), 3, 0).unwrap();
+    assert!(player
+        .add_object(1, GdiObject::Brush(Brush::default()), 4)
+        .is_ok());
 }
 
 #[test]

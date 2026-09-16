@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 const HEADER: u16 = 0x4001;
 const END_OF_FILE: u16 = 0x4002;
+const GET_DC: u16 = 0x4004;
 const OBJECT: u16 = 0x4008;
 const CLEAR: u16 = 0x4009;
 const FILL_RECTS: u16 = 0x400a;
@@ -241,6 +242,57 @@ pub fn inspect(comments: &[Comment<'_>], limits: &ResourceLimits) -> Result<EmfP
     inspect_records(&records)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassicPlayback {
+    DualGetDc,
+    NoncanonicalEmptyOnly,
+}
+
+/// Identifies the narrow stream forms for which Windows plays ordinary EMF
+/// records instead of an EMF+ drawing stream.
+pub fn classic_playback(
+    comments: &[Comment<'_>],
+    limits: &ResourceLimits,
+) -> Result<Option<ClassicPlayback>> {
+    let stream = assemble(comments, limits)?;
+    let records = records(&stream, limits)?;
+    let info = inspect_records(&records)?;
+    let has_drawing = records.iter().any(|record| is_drawing_record(record.kind));
+    if info.dual && records.iter().any(|record| record.kind == GET_DC) && !has_drawing {
+        Ok(Some(ClassicPlayback::DualGetDc))
+    } else if !info.dual && !has_drawing {
+        Ok(Some(ClassicPlayback::NoncanonicalEmptyOnly))
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_drawing_record(kind: u16) -> bool {
+    matches!(
+        kind,
+        CLEAR
+            | FILL_RECTS
+            | DRAW_RECTS
+            | FILL_POLYGON
+            | DRAW_LINES
+            | FILL_ELLIPSE
+            | DRAW_ELLIPSE
+            | FILL_PIE
+            | DRAW_PIE
+            | DRAW_ARC
+            | FILL_REGION
+            | FILL_PATH
+            | DRAW_PATH
+            | FILL_CLOSED_CURVE
+            | DRAW_CLOSED_CURVE
+            | DRAW_CURVE
+            | DRAW_BEZIERS
+            | DRAW_IMAGE
+            | DRAW_IMAGE_POINTS
+            | DRAW_STRING
+    )
+}
+
 fn inspect_records(records: &[Record<'_>]) -> Result<EmfPlusInfo> {
     let header = records
         .first()
@@ -429,7 +481,7 @@ impl Player<'_> {
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<()> {
         match record.kind {
-            HEADER | END_OF_FILE => Ok(()),
+            HEADER | END_OF_FILE | GET_DC => Ok(()),
             OBJECT => self.object(record),
             CLEAR => {
                 require_len(record, 4)?;
@@ -1349,17 +1401,6 @@ impl Player<'_> {
         record: Record<'_>,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<()> {
-        require_len(record, 4)?;
-        let scale = f64::from(f32_at(record.data, 0)?);
-        if !scale.is_finite() || scale <= 0.0 {
-            return invalid(
-                record.origin,
-                record.index,
-                record.kind,
-                record.offset,
-                "invalid page scale",
-            );
-        }
         let unit = u32::from(record.flags & 0xff);
         if unit > 6 {
             return invalid(
@@ -1368,6 +1409,27 @@ impl Player<'_> {
                 record.kind,
                 record.offset,
                 "invalid page unit",
+            );
+        }
+        let scale = if record.data.is_empty() && record.flags & !0x00ff == 0 {
+            self.note(
+                record,
+                diagnostics,
+                "emfplus_noncanonical_set_page_transform",
+                "SetPageTransform omits the default PageScale; using 1.0 for compatibility with Windows GDI+ playback",
+            )?;
+            1.0
+        } else {
+            require_len(record, 4)?;
+            f64::from(f32_at(record.data, 0)?)
+        };
+        if !scale.is_finite() || scale <= 0.0 {
+            return invalid(
+                record.origin,
+                record.index,
+                record.kind,
+                record.offset,
+                "invalid page scale",
             );
         }
         if unit <= 1 {
@@ -4098,6 +4160,38 @@ mod tests {
             inspect(&[comment(&dual)], &ResourceLimits::default())
                 .unwrap()
                 .dual
+        );
+    }
+
+    #[test]
+    fn compact_default_page_transform_is_diagnostic_and_getdc_is_classified() {
+        let data = stream(
+            true,
+            &[
+                record(SET_PAGE_TRANSFORM, 1, Vec::new()),
+                record(GET_DC, 0, Vec::new()),
+            ],
+        );
+        assert_eq!(
+            classic_playback(&[comment(&data)], &ResourceLimits::default()).unwrap(),
+            Some(ClassicPlayback::DualGetDc)
+        );
+        let (_, diagnostics) = render(&data, false).unwrap();
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "emfplus_noncanonical_set_page_transform" }));
+        assert!(matches!(
+            render(&data, true),
+            Err(MetafileError::UnsupportedCriticalFeature(_))
+        ));
+    }
+
+    #[test]
+    fn empty_only_stream_is_classified_as_noncanonical_classic_playback() {
+        let data = stream(false, &[]);
+        assert_eq!(
+            classic_playback(&[comment(&data)], &ResourceLimits::default()).unwrap(),
+            Some(ClassicPlayback::NoncanonicalEmptyOnly)
         );
     }
 

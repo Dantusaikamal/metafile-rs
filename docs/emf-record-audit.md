@@ -14,7 +14,9 @@ covers records exercised by committed fixtures and focused unit tests.
 - Objects: `CREATEPEN`, solid `EXTCREATEPEN` (including standard end caps and
   joins), solid/null
   `CREATEBRUSHINDIRECT`, `EXTCREATEFONTINDIRECTW`, `SELECTOBJECT`,
-  `DELETEOBJECT`, and common stock objects. Deleting an active object restores
+  `DELETEOBJECT`, and the defined stock brush, pen, font, and default-palette
+  pseudo-handles. Stock selections do not consume object-table slots, and
+  deleting a valid stock pseudo-handle is a harmless no-op. Deleting an active object restores
   the default object of that type in current and saved DC state, and the freed
   handle can be reused deterministically.
 - Vectors: move/line, polyline/polygon/polypolygon and 16-bit variants,
@@ -60,5 +62,9 @@ covers records exercised by committed fixtures and focused unit tests.
   object handles, paths, transforms, comments, and DIB payloads return typed
   errors.
 - EMF+ records embedded in GDI comments are classified as
-  `MetafileFormat::EmfPlus`. Inspection succeeds; playback always fails
-  explicitly and never silently selects an ordinary-EMF fallback.
+  `MetafileFormat::EmfPlus`. Dedicated EMF+ playback is the default. Two
+  Windows-validated producer forms select classic records explicitly and emit
+  structured diagnostics: a state-only Dual stream that contains `GetDC`, and
+  a noncanonical empty Only stream in permissive mode. Strict mode rejects the
+  latter. Ordinary records are never chosen merely because an EMF+ operation
+  is unsupported.

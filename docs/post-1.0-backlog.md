@@ -21,6 +21,9 @@ shows it is common.
 
 - add independently redistributable Word/DOCX and PowerPoint/PPTX WMF, EMF,
   and EMF+ samples when maintainers can provide them with provenance;
+- retain the ignored private Office corpus as a regression gate; the initial
+  three-document run did not promote any remaining P2 feature to a release
+  blocker;
 - add a regression fixture for every real-file rendering or security defect;
 - tune performance only from measured representative workloads.
 

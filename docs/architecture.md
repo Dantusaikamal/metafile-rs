@@ -17,8 +17,10 @@ top-level inspection/render result shape.
 EMF+ records are reassembled across `EMR_GDICOMMENT` boundaries before bounded
 inner-record parsing. EMF+ owns its 64-slot object table, graphics state,
 Save/Restore/container stacks, page/world transforms, and Dual policy. The EMF
-container always routes a detected EMF+ stream to this player and never silently
-renders the ordinary-EMF Dual fallback.
+container routes a detected EMF+ stream to this player. Classic records are
+played only for an explicit state-only `GetDC` delegation or the narrow
+diagnostic empty-Only compatibility form; unsupported drawing records never
+cause an implicit fallback.
 
 Metafile records never append SVG directly. Playback mutates a complete device
 context and emits mapped graphics primitives. This boundary is intended for

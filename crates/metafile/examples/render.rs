@@ -1,18 +1,29 @@
 use std::{env, fs, time::Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args_os().skip(1);
+    let mut raw_args = env::args_os().skip(1).collect::<Vec<_>>();
+    let strict = raw_args
+        .first()
+        .is_some_and(|argument| argument == "--strict");
+    if strict {
+        raw_args.remove(0);
+    }
+    let mut args = raw_args.into_iter();
     let input = args
         .next()
-        .ok_or("usage: render input.wmf output.svg [diagnostics.json]")?;
+        .ok_or("usage: render [--strict] input.wmf output.svg [diagnostics.json]")?;
     let output = args.next().ok_or("missing output SVG path")?;
     let diagnostics = args.next();
     let bytes = fs::read(&input)?;
+    let options = metafile::RenderOptions {
+        strict,
+        ..metafile::RenderOptions::default()
+    };
     let inspect_started = Instant::now();
-    let info = metafile::inspect(&bytes)?;
+    let info = metafile::inspect_with_options(&bytes, &options)?;
     let inspect_elapsed = inspect_started.elapsed();
     let render_started = Instant::now();
-    let result = metafile::to_svg(&bytes, Default::default())?;
+    let result = metafile::to_svg(&bytes, options)?;
     let render_elapsed = render_started.elapsed();
     fs::write(output, result.svg.as_bytes())?;
     if let Some(path) = diagnostics {

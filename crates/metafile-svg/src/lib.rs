@@ -92,7 +92,10 @@ impl SvgRenderer {
                 limit: self.limits.max_pixels,
             });
         }
-        let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\">", n(display_w), n(display_h), n(bounds.left), n(bounds.top), n(width), n(height));
+        // Metafile device pixels are not required to be square. SVG's default
+        // `meet` behavior would silently preserve the logical viewBox aspect
+        // ratio when the declared physical frame has a different ratio.
+        let mut svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"{} {} {} {}\" preserveAspectRatio=\"none\">", n(display_w), n(display_h), n(bounds.left), n(bounds.top), n(width), n(height));
         if !self.definitions.is_empty() {
             svg.push_str("<defs>");
             for d in self.definitions {
@@ -1505,6 +1508,7 @@ mod tests {
         .unwrap();
         let s = r.finish(None, None).unwrap();
         assert!(s.contains("a&lt;&amp;&quot;"));
+        assert!(s.contains("preserveAspectRatio=\"none\""));
         assert!(!s.contains("viewBox=\"2 0.0"));
     }
 
