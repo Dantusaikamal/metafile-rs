@@ -12,9 +12,9 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-metafile-core = { path = "../../crates/metafile-core" }
-metafile = { path = "../../crates/metafile" }
-metafile-wmf = { path = "../../crates/metafile-wmf" }
+metafile-core = { path = "../../crates/metafile-core", version = "1.0.1" }
+metafile = { path = "../../crates/metafile", version = "1.0.1" }
+metafile-wmf = { path = "../../crates/metafile-wmf", version = "1.0.1" }
 serde.workspace = true
 serde-wasm-bindgen.workspace = true
 wasm-bindgen.workspace = true

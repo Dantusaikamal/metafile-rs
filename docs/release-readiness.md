@@ -1,4 +1,4 @@
-# Release-readiness gates
+# 1.0.1 release-readiness gates
 
 This checklist records evidence, not intent. Local results do not mark remote
 GitHub-hosted jobs or reference-renderer qualification as complete.

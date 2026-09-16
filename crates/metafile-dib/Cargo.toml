@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-metafile-core = { path = "../metafile-core" }
+metafile-core = { path = "../metafile-core", version = "1.0.1" }
 
 [lints]
 workspace = true

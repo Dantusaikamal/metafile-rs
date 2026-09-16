@@ -8,13 +8,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-metafile-core = { path = "../metafile-core" }
+metafile-core = { path = "../metafile-core", version = "1.0.1" }
 serde.workspace = true
 png.workspace = true
 jpeg-decoder.workspace = true
 
 [dev-dependencies]
-metafile-svg = { path = "../metafile-svg" }
+metafile-svg = { path = "../metafile-svg", version = "1.0.1" }
 jpeg-encoder = "0.6"
 
 [lints]

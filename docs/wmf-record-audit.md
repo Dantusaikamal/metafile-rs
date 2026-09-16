@@ -1,7 +1,7 @@
 # WMF record qualification audit
 
 This inventory was reviewed against the MS-WMF record definitions during the
-0.1.0 qualification pass. “Rendered” means a first-party renderer event is
+1.0.1 qualification pass. “Rendered” means a first-party renderer event is
 emitted. “Approximate” is never intended to imply Windows pixel identity.
 
 | Record | Parsed | Played/rendered status | Qualification and limits |

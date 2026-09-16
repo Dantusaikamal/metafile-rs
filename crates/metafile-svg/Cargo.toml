@@ -9,9 +9,8 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
-metafile-core = { path = "../metafile-core" }
+metafile-core = { path = "../metafile-core", version = "1.0.1" }
 png.workspace = true
 
 [lints]
 workspace = true
-

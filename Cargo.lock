@@ -143,7 +143,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metafile"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "metafile-core",
  "metafile-emf",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "metafile-core"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -163,14 +163,14 @@ dependencies = [
 
 [[package]]
 name = "metafile-dib"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "metafile-core",
 ]
 
 [[package]]
 name = "metafile-emf"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "encoding_rs",
  "metafile-core",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "metafile-emfplus"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "jpeg-decoder",
  "jpeg-encoder",
@@ -194,14 +194,14 @@ dependencies = [
 
 [[package]]
 name = "metafile-golden"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "png",
 ]
 
 [[package]]
 name = "metafile-svg"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "base64",
  "metafile-core",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "metafile-wasm"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "js-sys",
  "metafile",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "metafile-wmf"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "encoding_rs",
  "metafile-core",

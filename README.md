@@ -1,16 +1,18 @@
 # metafile-rs
 
-`metafile-rs` is an early-stage, first-party Rust engine for parsing Windows
-Metafiles and rendering deterministic, self-contained SVG. It targets native
+`metafile-rs` is a first-party Rust engine for parsing Windows Metafiles and
+rendering deterministic, self-contained SVG. It targets native
 Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
 converters, browser Canvas, or remote services.
 
-This release establishes substantial WMF, ordinary-EMF, and common EMF+
-playback. It is not a claim of complete Windows GDI/GDI+ compatibility.
+Version 1.0.1 is production-ready for common WMF, EMF, and EMF+ document
+workloads, with structured diagnostics for unsupported or approximate edge
+cases. It is not a claim of universal or pixel-perfect Windows GDI/GDI+
+compatibility.
 
-The intended 1.0 engine supports WMF, ordinary EMF, and EMF+ through the same
+The engine supports WMF, ordinary EMF, and EMF+ through the same
 first-party native/WASM byte-to-SVG API with structured diagnostics. After it
-is qualified, `emf-to-png` 1.0 is intended to use this backend for
+is integrated, `emf-to-png` is intended to use this backend for
 WMF/EMF/EMF+ to SVG/PNG/JPEG without Office, LibreOffice, Inkscape, Canvas, or
 an external conversion process. This is a roadmap, not a capability claim.
 
@@ -48,7 +50,7 @@ level consumers can call `metafile_wmf::playback` with any
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
 | Ordinary EMF | Partial | Validated headers, world/mapping transforms, common vectors/paths, transformed polygon/path clips, Unicode/ANSI text, and affine BI_RGB StretchDIBits are rendered. Arbitrary-affine text and non-uniform geometric pens remain explicit approximations. See `docs/emf-record-audit.md`. |
-| EMF+ | Common document subset | EMF+ Only and Dual streams use dedicated playback for vectors/paths, state and affine transforms, boolean regions, Unicode text, PNG/JPEG/raw images, textures, and linear gradients. Text metrics and selected layout behavior are approximate. Path gradients and advanced pens remain explicit P2 gaps; the ordinary-EMF Dual fallback is never silently substituted. |
+| EMF+ | Common document subset | EMF+ Only and Dual streams use dedicated playback for vectors/paths, state and affine transforms, boolean regions, Unicode text, PNG/JPEG/raw images, textures, and linear gradients. Text metrics and selected layout behavior are approximate. Path gradients and advanced pens remain explicit P2 gaps. Classic records are used only for explicit, diagnostic `GetDC`/legacy-empty compatibility forms—not as a fallback for unsupported drawing. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
 permissive mode. In strict mode, an unknown operation or a known operation
@@ -60,9 +62,10 @@ Standard WMFs have their SVG viewBox inferred from emitted drawing extents.
 Files with no drawable operations receive a 1x1 fallback viewBox and an
 explicit diagnostic that bounds are unreliable. Compatibility is being
 qualified against a provenance-controlled corpus. The committed corpus
-currently contains project-generated Windows GDI outputs, not yet a broad
-independent Office/DOCX corpus. Passing synthetic or generated cases is not
-evidence of pixel-perfect Windows GDI equivalence.
+contains project-generated Windows GDI outputs plus an ignored, maintainer-owned
+private Office corpus. Public redistributable Office evidence remains limited.
+Passing generated or private cases is not evidence of pixel-perfect Windows
+GDI equivalence.
 
 ## Architecture
 
@@ -113,8 +116,8 @@ A cargo-fuzz target is provided under `fuzz/`. Real-world fixtures belong in
 `fixtures/real-world/` and require recorded provenance and redistribution
 permission in `fixtures/manifest.json`; private files can live in ignored
 `fixtures/private/` or `METAFILE_FIXTURE_DIR`. See
-[docs/release-readiness.md](docs/release-readiness.md) for the remaining 0.1.0
-evidence gates.
+[docs/release-readiness.md](docs/release-readiness.md) for the evidence gates
+and remaining hosted-CI/public-corpus boundaries.
 
 ## License
 

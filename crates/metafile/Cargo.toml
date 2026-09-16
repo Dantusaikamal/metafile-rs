@@ -8,10 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-metafile-emf = { path = "../metafile-emf" }
-metafile-core = { path = "../metafile-core" }
-metafile-svg = { path = "../metafile-svg" }
-metafile-wmf = { path = "../metafile-wmf" }
+metafile-emf = { path = "../metafile-emf", version = "1.0.1" }
+metafile-core = { path = "../metafile-core", version = "1.0.1" }
+metafile-svg = { path = "../metafile-svg", version = "1.0.1" }
+metafile-wmf = { path = "../metafile-wmf", version = "1.0.1" }
 serde.workspace = true
 
 [dev-dependencies]
