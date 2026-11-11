@@ -79,6 +79,7 @@ fn error(e: metafile_core::MetafileError) -> JsValue {
         metafile_core::MetafileError::UnsupportedCriticalFeature(_) => "unsupported_feature",
         metafile_core::MetafileError::InvalidEmfPlus { .. } => "invalid_emf_plus",
         metafile_core::MetafileError::SvgGeneration(_) => "svg_generation",
+        _ => "metafile_error",
     };
     js(&ErrorPayload {
         code,

@@ -1,27 +1,39 @@
 # metafile-rs
 
-`metafile-rs` is a first-party Rust engine for parsing Windows Metafiles and
-rendering deterministic, self-contained SVG. It targets native
-Rust and `wasm32-unknown-unknown`. It does not call Windows GDI, external
-converters, browser Canvas, or remote services.
+`metafile-rs` reads WMF, EMF, and EMF+ files and renders them as self-contained
+SVG. The same engine runs as native Rust or `wasm32-unknown-unknown`; it does
+not call Windows GDI, Office, LibreOffice, Inkscape, browser Canvas, or a
+remote service.
 
-Version 1.0.1 is production-ready for common WMF, EMF, and EMF+ document
-workloads, with structured diagnostics for unsupported or approximate edge
-cases. It is not a claim of universal or pixel-perfect Windows GDI/GDI+
-compatibility.
+Version 1.0.1 covers the records commonly found in Office and other document
+workflows. Unsupported records and known approximations are reported through
+structured diagnostics. The compatibility table below describes the current
+boundary; pixel-for-pixel GDI/GDI+ compatibility is not promised.
 
-The engine supports WMF, ordinary EMF, and EMF+ through the same first-party
-native/WASM byte-to-SVG API. It powers `emf-to-png` 1.0.0 for server-side
-WMF/EMF/EMF+ to SVG, PNG, and JPEG conversion without Office, LibreOffice,
-Inkscape, Canvas, or an external conversion process.
+The engine also powers `emf-to-png` 1.0.0, which adds the Node.js API and
+SVG-to-PNG/JPEG rasterization.
 
 ## Rust API
 
+Add the high-level crate to an application:
+
+```toml
+[dependencies]
+metafile = "1.0.1"
+```
+
 ```rust
-let bytes = std::fs::read("drawing.wmf")?;
-let info = metafile::inspect(&bytes)?;
-let result = metafile::to_svg(&bytes, Default::default())?;
-std::fs::write("drawing.svg", result.svg)?;
+use metafile::{inspect, to_svg};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = std::fs::read("drawing.wmf")?;
+    let info = inspect(&bytes)?;
+    println!("{info:#?}");
+
+    let result = to_svg(&bytes, Default::default())?;
+    std::fs::write("drawing.svg", result.svg)?;
+    Ok(())
+}
 ```
 
 `RenderResult` includes SVG, format-neutral `MetafileInfo` (with nested
@@ -30,7 +42,7 @@ strict mode and configurable resource limits. Lower-level consumers can use
 the format crates with any `metafile_core::Renderer` implementation without
 depending on the SVG backend.
 
-## WMF compatibility
+## Compatibility summary
 
 | Area | Status | Notes |
 | --- | --- | --- |
@@ -49,7 +61,7 @@ depending on the SVG backend.
 | Solid/null brushes | Supported | Hatch, pattern, and DIB-pattern brush fidelity is diagnostic-only. |
 | Raster operations / META_ESCAPE | Diagnostic-only | SRCCOPY bitmap transfer is supported; other operations are not emulated. |
 | Ordinary EMF | Partial | Validated headers, world/mapping transforms, common vectors/paths, transformed polygon/path clips, Unicode/ANSI text, and affine BI_RGB StretchDIBits are rendered. Arbitrary-affine text and non-uniform geometric pens remain explicit approximations. See `docs/emf-record-audit.md`. |
-| EMF+ | Common document subset | EMF+ Only and Dual streams use dedicated playback for vectors/paths, state and affine transforms, boolean regions, Unicode text, PNG/JPEG/raw images, textures, and linear gradients. Text metrics and selected layout behavior are approximate. Path gradients and advanced pens remain explicit P2 gaps. Classic records are used only for explicit, diagnostic `GetDC`/legacy-empty compatibility forms—not as a fallback for unsupported drawing. |
+| EMF+ | Common document subset | EMF+ Only and Dual streams use dedicated playback for vectors/paths, state and affine transforms, boolean regions, Unicode text, PNG/JPEG/raw images, textures, and linear gradients. Text metrics and selected layout behavior are approximate. Path gradients and advanced pens remain P2 gaps. Classic records are used only for diagnostic `GetDC`/legacy-empty compatibility forms, not as a fallback for unsupported drawing. |
 
 Unknown records are safely skipped with capped, aggregated diagnostics in
 permissive mode. In strict mode, an unknown operation or a known operation
@@ -59,21 +71,22 @@ fail strict rendering.
 
 Standard WMFs have their SVG viewBox inferred from emitted drawing extents.
 Files with no drawable operations receive a 1x1 fallback viewBox and an
-explicit diagnostic that bounds are unreliable. Compatibility is qualified
-against a provenance-controlled corpus. The committed corpus
-contains project-generated Windows GDI outputs plus an ignored, maintainer-owned
-private Office corpus. Public redistributable Office evidence remains limited.
-Passing generated or private cases is not evidence of pixel-perfect Windows
-GDI equivalence.
+explicit diagnostic that bounds are unreliable. Compatibility is checked
+against a provenance-controlled corpus containing project-generated Windows
+GDI/GDI+ cases and a maintainer-owned private Office corpus. The public
+redistributable Office corpus is still limited, and these results should not be
+read as proof of pixel-perfect Windows rendering.
 
 ## Architecture
 
 ```text
-metafile-wmf / metafile-emf / metafile-emfplus -> stateful playback
-                                      -> metafile-core Renderer events
-metafile-svg                         -> deterministic SVG
-metafile facade composes playback + SVG rendering
-bindings/wasm: Uint8Array/bytes -> structured metadata/render result
+WMF / EMF / EMF+ bytes
+        -> format parser and stateful playback
+        -> metafile-core Renderer events
+        -> metafile-svg
+        -> self-contained SVG
+
+bindings/wasm exposes the same flow as Uint8Array in / JS values out.
 ```
 
 See [docs/architecture.md](docs/architecture.md),

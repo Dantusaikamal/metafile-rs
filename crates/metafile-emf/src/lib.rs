@@ -1,4 +1,8 @@
-//! Safe, first-party EMF parsing, inspection, and renderer-independent playback.
+//! Ordinary EMF parsing, inspection, and renderer-independent playback.
+//!
+//! This crate handles ordinary EMF records and the EMF comment containers used
+//! for EMF+ streams. Playback emits format-neutral renderer events; use the
+//! high-level `metafile` crate for automatic detection and SVG output.
 
 mod reader;
 

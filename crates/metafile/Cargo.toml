@@ -1,11 +1,16 @@
 [package]
 name = "metafile"
-description = "Convenient composition API for metafile-rs parsers and renderers"
+description = "High-level WMF, EMF, and EMF+ parsing and deterministic SVG rendering"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile"
+readme = "README.md"
+keywords = ["windows-metafile", "wmf", "emf", "emf-plus", "svg"]
+categories = ["graphics", "parser-implementations", "multimedia::images"]
 
 [dependencies]
 metafile-emf = { path = "../metafile-emf", version = "1.0.1" }

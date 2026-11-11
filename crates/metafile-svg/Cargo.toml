@@ -1,11 +1,16 @@
 [package]
 name = "metafile-svg"
-description = "Deterministic SVG renderer for metafile-rs"
+description = "Deterministic, self-contained SVG renderer backend for metafile-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile-svg"
+readme = "README.md"
+keywords = ["svg", "windows-metafile", "wmf", "emf", "renderer"]
+categories = ["graphics", "multimedia::images"]
 
 [dependencies]
 base64.workspace = true

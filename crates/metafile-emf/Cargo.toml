@@ -1,11 +1,16 @@
 [package]
 name = "metafile-emf"
-description = "First-party safe EMF parser, inspection, and renderer-independent playback engine"
+description = "EMF parsing, inspection, and renderer-independent playback for metafile-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile-emf"
+readme = "README.md"
+keywords = ["emf", "windows-metafile", "gdi", "parser", "graphics"]
+categories = ["graphics", "parser-implementations"]
 
 [dependencies]
 encoding_rs.workspace = true

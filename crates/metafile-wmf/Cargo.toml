@@ -1,11 +1,16 @@
 [package]
 name = "metafile-wmf"
-description = "First-party safe WMF parser, inspection, and renderer-independent playback engine"
+description = "WMF parsing, inspection, and renderer-independent playback for metafile-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile-wmf"
+readme = "README.md"
+keywords = ["wmf", "windows-metafile", "gdi", "parser", "graphics"]
+categories = ["graphics", "parser-implementations"]
 
 [dependencies]
 encoding_rs.workspace = true

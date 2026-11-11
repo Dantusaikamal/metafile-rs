@@ -1,11 +1,16 @@
 [package]
 name = "metafile-dib"
-description = "Internal safe DIB decoder shared by metafile format players"
+description = "Bounded DIB decoding shared by metafile-rs format players"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile-dib"
+readme = "README.md"
+keywords = ["dib", "bitmap", "wmf", "emf", "windows-metafile"]
+categories = ["multimedia::images", "parser-implementations"]
 
 [dependencies]
 metafile-core = { path = "../metafile-core", version = "1.0.1" }

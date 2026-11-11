@@ -1,11 +1,16 @@
 [package]
 name = "metafile-core"
-description = "Shared graphics semantics for first-party Windows Metafile engines"
+description = "Shared graphics types, renderer interfaces, diagnostics, and limits for metafile-rs"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/metafile-core"
+readme = "README.md"
+keywords = ["windows-metafile", "wmf", "emf", "gdi", "graphics"]
+categories = ["graphics", "parser-implementations"]
 
 [dependencies]
 serde.workspace = true

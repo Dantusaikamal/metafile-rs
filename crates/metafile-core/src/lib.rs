@@ -1,4 +1,9 @@
-//! Shared, format-neutral graphics types and renderer events.
+//! Shared, format-neutral graphics state, geometry, diagnostics, and rendering events.
+//!
+//! Format parsers use these types to model GDI/GDI+ playback without depending
+//! on SVG or any platform graphics API. Most applications should use the
+//! high-level `metafile` crate instead; this crate is public for alternative
+//! renderers and format-specific integrations.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -243,6 +248,8 @@ impl Default for RenderOptions {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
+/// Typed failures produced while parsing, playing back, or serializing a metafile.
 pub enum MetafileError {
     #[error("unsupported metafile format")]
     UnsupportedFormat,

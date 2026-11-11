@@ -1,4 +1,8 @@
-//! Safe, first-party WMF parsing, inspection, and renderer-independent playback.
+//! WMF parsing, inspection, and renderer-independent playback.
+//!
+//! Both Aldus Placeable and standard WMF containers are supported. Playback
+//! emits format-neutral events through [`metafile_core::Renderer`]; use the
+//! high-level `metafile` crate when SVG is the desired output.
 
 mod reader;
 mod record;

@@ -17,10 +17,19 @@ struct Fixture {
 #[test]
 fn committed_corpus_matches_declared_support_contract() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let manifest: Manifest = serde_json::from_slice(
-        &fs::read(root.join("fixtures/manifest.json")).expect("read fixture manifest"),
-    )
-    .expect("parse fixture manifest");
+    let manifest_path = root.join("fixtures/manifest.json");
+    if !manifest_path.is_file() {
+        assert!(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(".cargo_vcs_info.json")
+                .is_file(),
+            "fixture manifest is required when testing from the repository"
+        );
+        return;
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(manifest_path).expect("read fixture manifest"))
+            .expect("parse fixture manifest");
     assert!(
         manifest
             .fixtures

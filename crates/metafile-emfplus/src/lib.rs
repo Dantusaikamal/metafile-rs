@@ -1,4 +1,8 @@
-//! Safe, first-party EMF+ stream parsing and renderer-independent playback.
+//! EMF+ stream parsing, inspection, and renderer-independent playback.
+//!
+//! The API consumes reassembled EMF+ comment payloads and emits shared
+//! renderer events. Most callers should use the high-level `metafile` crate,
+//! which performs outer EMF parsing and format classification.
 
 use metafile_core::{
     Bitmap, BitmapPlacement, BitmapSampling, ClipOperation, ClipRegion, Color, Diagnostic, Font,

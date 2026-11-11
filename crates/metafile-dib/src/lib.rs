@@ -1,3 +1,9 @@
+//! Bounded decoding and cropping of DIB payloads embedded in metafiles.
+//!
+//! This is an implementation-support crate for the WMF and EMF playback
+//! engines. It validates dimensions, strides, compression, palettes, and
+//! allocation sizes before producing renderer-neutral bitmap data.
+
 use metafile_core::{Bitmap, MetafileError, ResourceLimits, Result};
 
 #[derive(Clone, Copy)]

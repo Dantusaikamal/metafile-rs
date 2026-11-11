@@ -1,4 +1,8 @@
-//! Deterministic, self-contained SVG serialization.
+//! Deterministic, self-contained SVG serialization for format-neutral renderer events.
+//!
+//! The renderer embeds supported bitmap resources, creates stable resource
+//! identifiers, and enforces configured output limits. It does not parse WMF,
+//! EMF, or EMF+ bytes itself.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use metafile_core::{

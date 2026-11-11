@@ -1,14 +1,15 @@
 # Architecture
 
-`metafile-core` owns format-neutral geometry, GDI-like state, graphics objects,
-resource limits, diagnostics, errors, render options, and renderer events.
-`metafile-wmf`, `metafile-emf`, and `metafile-emfplus` own bounded format parsing, header validation,
-stateful playback, inspection, text decoding, and DIB decoding. They depend on
-core, not on an output backend. `metafile-svg` independently consumes
-renderer events and serializes deterministic self-contained SVG. The small
-`metafile` facade composes WMF playback with SVG and preserves the convenient
-`to_svg` API. `metafile-wasm` maps byte slices and serializable Rust values to
-JavaScript values through that facade.
+`metafile-core` contains the geometry, graphics state, objects, limits,
+diagnostics, errors, options, and renderer events shared by all formats.
+`metafile-wmf`, `metafile-emf`, and `metafile-emfplus` parse their respective
+record streams and play them into a `metafile-core::Renderer`. DIB decoding is
+shared by WMF and EMF through `metafile-dib`.
+
+The format crates do not depend on an output backend. `metafile-svg` consumes
+renderer events and writes self-contained SVG, while the `metafile` facade
+handles format detection and joins parsing, playback, and SVG output behind
+`inspect` and `to_svg`. `metafile-wasm` exposes that facade to JavaScript.
 
 The facade owns a format-neutral `MetafileInfo` envelope and nests
 parser-specific metadata. WMF, ordinary EMF, and EMF+ therefore share the
@@ -26,11 +27,12 @@ Metafile records never append SVG directly. Playback mutates a complete device
 context and emits mapped graphics primitives. WMF, EMF, and EMF+ all use this
 boundary, which also permits future renderer backends.
 
-Affine world transforms, generic line/cubic path figures, fill-rule-aware polygon/path clip
-regions, and affine bitmap placement are format-neutral core concepts. EMF
-converts boxes, ellipses, and arcs to paths before applying arbitrary affine
-transforms. EMF uses 32-bit object handles internally while emitting the same
-pen, brush, font, text, bitmap, clip, primitive, and path events as WMF.
+Affine world transforms, generic line/cubic path figures, fill-rule-aware
+polygon/path clip regions, and affine bitmap placement are format-neutral core
+concepts. EMF converts boxes, ellipses, and arcs to paths before applying
+arbitrary affine transforms. EMF uses 32-bit object handles internally while
+emitting the same pen, brush, font, text, bitmap, clip, primitive, and path
+events as WMF.
 
 Points and vectors have distinct mapping operations. Origins affect points and
 rectangles, while pen widths, text advances, radii, and other extents receive
@@ -48,6 +50,7 @@ diagnostics, and the renderer boundary.
 Classic `Brush`, `Pen`, `Font`, and `DeviceContext` remain GDI types. EMF+ owns
 its richer objects and resolves them at draw time to format-neutral `Paint`,
 `Stroke`, `Path`, `TextRun`, `ClipRegion`, and affine `BitmapPlacement` values.
-Core currently represents solid/hatch/linear-gradient paint and rich stroke
-style; texture/path-gradient paint, boolean regions, image attributes, and
-advanced string layout remain explicit future vocabulary gaps.
+Core currently represents solid, hatch, linear-gradient, and texture paint;
+rich stroke style; affine images; and boolean clip regions. Path gradients,
+broader image attributes, and some advanced string-layout concepts are not yet
+part of the shared renderer vocabulary.
