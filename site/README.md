@@ -19,11 +19,16 @@ The prepare script copies the generated wasm-bindgen artifacts into `site/wasm/`
 ## Architecture
 
 - The browser reads selected bytes using File.arrayBuffer; nothing is sent to a server.
+- A dedicated Web Worker initializes the WASM module and performs inspection/rendering off the main UI thread.
 - `inspectMetafile(bytes)` detects the actual format and returns metadata.
 - `metafileToSvg(bytes, { strict })` returns the actual SVG and diagnostics.
 - SVG preview uses an object URL in an image element.
 - SVG export saves the engine's bytes. PNG/JPEG export uses browser Canvas to rasterize that SVG locally; the rasterized result may differ from native resvg.
 - A 20 MB input cap and 40 MP raster cap protect the UI. The Rust parser applies its own bounded resource limits.
+
+## Verification
+
+Run `node --check site/app.js`, `node --check site/worker.js` and `node scripts/site-check.mjs` for syntax and static contract checks. The CI workflow also builds the WASM engine and runs its Node and headless-Chrome smoke tests. Manually verify replacement, strict-mode failures, preview, PNG/JPEG transparency, and mobile behavior using representative WMF, EMF, and EMF+ fixtures before merging. Static checks alone do not prove visual or format fidelity.
 
 ## Hosting
 
