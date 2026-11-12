@@ -1,3 +1,4 @@
+import { samples, getSampleFile } from './samples.js';
 const $ = (id) => document.getElementById(id);
 const MAX_SIZE = 20 * 1024 * 1024;
 const state = { file: null, bytes: null, svg: '', info: null, url: null, ready: false, busy: false, generation: 0 };
@@ -26,6 +27,7 @@ function clearPreview() {
   $('preview-error').hidden = true;
   $('result').hidden = true;
   $('dropzone').hidden = false;
+  $('sample-grid').parentElement.hidden = false;
   $('download').disabled = true;
 }
 function setBusy(busy, label = 'Renderer ready') {
@@ -78,6 +80,7 @@ function display(data) {
   }
   $('result').hidden = false;
   $('dropzone').hidden = true;
+  $('sample-grid').parentElement.hidden = true;
   updateFormat();
 }
 async function renderCurrent() {
@@ -112,7 +115,7 @@ async function loadFile(file) {
 }
 function downloadBlob(blob, extension) {
   const url = URL.createObjectURL(blob), a = document.createElement('a');
-  a.href = url; a.download = state.file.name.replace(/\.[^.]+$/, '') + '.' + extension;
+  a.href = url; a.download = blob instanceof File ? blob.name : state.file.name.replace(/\.[^.]+$/, '') + '.' + extension;
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
@@ -144,8 +147,27 @@ zone.addEventListener('keydown', event => { if (event.key === 'Enter' || event.k
 input.addEventListener('change', event => { const file = event.target.files?.[0]; event.target.value = ''; loadFile(file); });
 for (const type of ['dragenter','dragover']) zone.addEventListener(type, event => { event.preventDefault(); zone.classList.add('dragging'); });
 for (const type of ['dragleave','drop']) zone.addEventListener(type, event => { event.preventDefault(); zone.classList.remove('dragging'); });
-zone.addEventListener('drop', event => loadFile(event.dataTransfer?.files?.[0]));
+zone.addEventListener('drop', event => { const sampleId = event.dataTransfer?.getData('application/x-metafile-sample'); if (sampleId) loadFile(getSampleFile(sampleId)); else loadFile(event.dataTransfer?.files?.[0]); });
 $('replace').addEventListener('click', () => input.click());
+for (const card of document.querySelectorAll('[data-sample]')) {
+  const id = card.dataset.sample;
+  card.addEventListener('click', event => { if (!event.target.closest('[data-download]')) loadFile(getSampleFile(id)); });
+  card.addEventListener('keydown', event => { if (event.target === card && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); loadFile(getSampleFile(id)); } });
+  card.addEventListener('dragstart', event => {
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-metafile-sample', id);
+    event.dataTransfer.setData('text/plain', samples.find(sample => sample.id === id).name);
+    zone.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => zone.classList.remove('dragging'));
+}
+for (const button of document.querySelectorAll('[data-download]')) {
+  button.addEventListener('click', event => {
+    event.stopPropagation();
+    const file = getSampleFile(button.dataset.download);
+    downloadBlob(file, 'wmf');
+  });
+}
 $('strict').addEventListener('change', renderCurrent);
 $('format').addEventListener('change', updateFormat);
 $('download').addEventListener('click', exportFile);
