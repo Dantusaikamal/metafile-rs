@@ -26,5 +26,26 @@ for (const sample of samples) {
   assert.equal(view.getUint16(24, true), 9, 'Invalid standard WMF header');
   assert.equal(view.getUint32(28, true) * 2, bytes.length - 22, 'WMF byte length mismatch');
   assert.ok(bytes.length > 100, 'Sample unexpectedly empty');
+  const objectCapacity = view.getUint16(32, true);
+  assert.equal(objectCapacity, sample.drawing.length + 1, 'WMF object table must hold the pen and every brush');
+  let offset = 40; // 22-byte placeable header + 18-byte standard WMF header
+  let createdObjects = 0;
+  let selectedBrushes = 0;
+  while (offset + 6 <= bytes.length) {
+    const recordWords = view.getUint32(offset, true);
+    const fn = view.getUint16(offset + 4, true);
+    assert.ok(recordWords >= 3 && offset + recordWords * 2 <= bytes.length, 'Invalid WMF record size');
+    if (fn === 0x02fa || fn === 0x02fc) createdObjects++;
+    if (fn === 0x012d) {
+      const selected = view.getUint16(offset + 6, true);
+      assert.ok(selected < objectCapacity, 'Selected WMF object exceeds declared capacity');
+      if (selected !== 0) selectedBrushes++;
+    }
+    offset += recordWords * 2;
+    if (fn === 0) break;
+  }
+  assert.equal(createdObjects, objectCapacity, 'Declared WMF object count differs from actual creations');
+  assert.equal(selectedBrushes, sample.drawing.length, 'Each shape should select its own brush');
+  assert.equal(offset, bytes.length, 'WMF records must consume the complete file');
 }
 console.log('Three WMF sample structure checks passed');
