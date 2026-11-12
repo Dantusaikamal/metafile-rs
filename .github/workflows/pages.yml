@@ -1,0 +1,45 @@
+name: Deploy browser converter
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'scripts/prepare-site.mjs'
+      - 'scripts/build-wasm.mjs'
+      - 'bindings/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - run: node scripts/build-wasm.mjs
+      - run: node scripts/prepare-site.mjs
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
