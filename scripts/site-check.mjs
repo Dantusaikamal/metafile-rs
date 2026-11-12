@@ -15,3 +15,16 @@ assert.match(html, /Frequently asked questions/);
 assert.match(html, /canonical/);
 assert.doesNotMatch(app, /fetch\(|XMLHttpRequest|sendBeacon/);
 console.log('Static site contract checks passed');
+
+const { samples, getSampleFile } = await import('../site/samples.js');
+assert.equal(samples.length, 3);
+for (const sample of samples) {
+  const file = getSampleFile(sample.id);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(bytes.buffer);
+  assert.equal(view.getUint32(0, true), 0x9ac6cdd7, 'Invalid placeable WMF signature');
+  assert.equal(view.getUint16(24, true), 9, 'Invalid standard WMF header');
+  assert.equal(view.getUint32(28, true) * 2, bytes.length - 22, 'WMF byte length mismatch');
+  assert.ok(bytes.length > 100, 'Sample unexpectedly empty');
+}
+console.log('Three WMF sample structure checks passed');
