@@ -10,23 +10,24 @@ function sampleBytes(drawing) {
     record(0x02fa, [0, 2, 0, ...[rgb('#283a31') & 65535, rgb('#283a31') >>> 16]]),
     record(0x012d, [0]),
   ];
-  for (const shape of drawing) {
+  // Keep one pen and one brush per shape in the WMF object table.
+  // This avoids relying on deleted-object slot reuse across renderers.
+  for (const [index, shape] of drawing.entries()) {
     const color = rgb(shape.color);
     commands.push(record(0x02fc, [0, color & 65535, color >>> 16, 0]));
-    commands.push(record(0x012d, [1]));
+    commands.push(record(0x012d, [index + 1]));
     if (shape.kind === 'polygon') {
       const points = shape.points;
       commands.push(record(0x0324, [points.length, ...points.flat()]));
     } else {
       commands.push(record(shape.kind === 'ellipse' ? 0x0418 : 0x041b, [shape.y + shape.h, shape.x + shape.w, shape.y, shape.x]));
     }
-    commands.push(record(0x01f0, [1])); // DELETEOBJECT brush; next brush reuses slot 1
   }
   commands.push(record(0, []));
   const body = commands.flat();
   const sizeWords = 9 + body.length / 2;
   const maxRecord = Math.max(...commands.map(c => c.length / 2));
-  const standard = [...word(1), ...word(9), ...word(0x0300), ...dword(sizeWords), ...word(2), ...dword(maxRecord), ...word(0)];
+  const standard = [...word(1), ...word(9), ...word(0x0300), ...dword(sizeWords), ...word(drawing.length + 1), ...dword(maxRecord), ...word(0)];
   // Aldus placeable header: magic, handle, bounding box, units per inch, reserved, XOR checksum.
   const placeableWords = [0xcdd7, 0x9ac6, 0, 0, 0, 720, 480, 1440, 0, 0];
   const checksum = placeableWords.reduce((a,b) => a ^ b, 0);
