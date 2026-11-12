@@ -37,3 +37,7 @@ The `pages.yml` workflow publishes the `site/` directory on pushes to `main`. En
 ## Privacy and limitations
 
 No file uploads, telemetry, or remote processing. GitHub Pages serves only static code and WASM. Browser raster export may fail for complex SVG; SVG remains available. The engine documents partial support for certain historical records and reports approximations as diagnostics. Files are not stored across reloads.
+
+## Try-it samples
+
+The landing page offers three small WMF sample drawings (color composition, geometry study, retro pattern). `site/samples.js` constructs actual placeable WMF binary files locally, without external assets or requests. Click a card to open it, drag it onto the upload zone on desktop, or use its download control to save a `.wmf` file and test ordinary upload. On touch devices, tap the card. The site contract test checks the sample headers and byte lengths; verify visual rendering in the browser as part of release review.
